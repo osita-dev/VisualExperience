@@ -64,8 +64,10 @@ import { MediaWorkbench } from "@/components/MediaWorkbench";
 import { ClipCutDialog } from "@/components/ClipCutDialog";
 import { SongWindowPicker } from "@/components/SongWindowPicker";
 import { PreviewCanvas } from "@/components/PreviewCanvas";
+import { PerfBadge } from "@/components/PerfBadge";
 import { TimelineStrip } from "@/components/TimelineStrip";
 import { EmptyState } from "@/components/EmptyState";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { resolve } from "@/core/resolve/resolve";
 import { validateTemplate } from "@/core/validate/validate";
 import type {
@@ -342,6 +344,12 @@ const MOBILE_TABS = [
   { id: "export", label: "Export", Icon: Download },
 ] as const;
 type MobileTab = (typeof MOBILE_TABS)[number]["id"];
+
+/* ?debug=1 → live fps/frame-time badge (perf round P3: measure the phone,
+   never guess) */
+const PERF_FLAG =
+  typeof window !== "undefined" &&
+  new URLSearchParams(window.location.search).get("debug") === "1";
 
 /** Clamp a slot length onto the 0.5s grid inside 1..60s. */
 function clampDur(v: number): number {
@@ -1072,6 +1080,7 @@ const TemplateBuilder = () => {
   const [leaveOpen, setLeaveOpen] = useState(false);
   /* which bottom-nav workbench is open on mobile (D51) */
   const [mobileTab, setMobileTab] = useState<MobileTab>("slots");
+  const isMobile = useIsMobile();
   const lastEditRef = useRef(0);
 
   const commit = useCallback((mutate: (p: Snap) => Snap) => {
@@ -1319,11 +1328,11 @@ const TemplateBuilder = () => {
         ?.scrollIntoView({ behavior: "smooth", block: "start" });
     });
   };
-  const mtabCls = (id: MobileTab) =>
-    `${mobileTab === id ? "" : "hidden"} md:block`;
-  const isMobileViewport = () =>
-    typeof window !== "undefined" &&
-    window.matchMedia("(max-width: 767.98px)").matches;
+  /* panel visibility: desktop renders every panel (unchanged); on mobile
+     ONLY the active tab's panel is mounted — a state change re-renders one
+     panel instead of seven (perf round P1). Export is the exception: it
+     hides via CSS so an in-flight export never unmounts. */
+  const showTab = (id: MobileTab) => !isMobile || mobileTab === id;
 
   /* -------- undo/redo keyboard (fields keep their own native undo) -------- */
   useEffect(() => {
@@ -1492,6 +1501,17 @@ const TemplateBuilder = () => {
   const stripSeek = useCallback(
     (t: number) => playerRef.current?.seek(t),
     [],
+  );
+  /* strip props by value, so memo(TimelineStrip) skips re-renders when
+     nothing about the chain changed (text typing, music, look edits) */
+  const stripSlots = useMemo(
+    () =>
+      draft.slots.map((s, i) => ({
+        uid: s.uid,
+        dur: s.dur,
+        thumb: testMedia[`s${i + 1}`]?.thumb || undefined,
+      })),
+    [draft.slots, testMedia],
   );
 
   const addSlot = () =>
@@ -1728,6 +1748,7 @@ const TemplateBuilder = () => {
 
   return (
     <div className="flex min-h-screen flex-col bg-background pb-24 md:pb-0">
+      {PERF_FLAG ? <PerfBadge /> : null}
       {/* header */}
       <header className="sticky top-0 z-40 border-b border-border bg-background/90 backdrop-blur">
         <div className="mx-auto flex max-w-7xl items-center gap-2 px-3 py-2.5 sm:px-6">
@@ -1865,7 +1886,7 @@ const TemplateBuilder = () => {
                      on mobile that also flips the bottom nav to Text */
                   if (draft.texts.some((t) => t.uid === id)) {
                     setSelectedText(id);
-                    if (isMobileViewport()) selectTab("texts");
+                    if (isMobile) selectTab("texts");
                   }
                 }}
                 onOverlayDrag={(id, x, y) => {
@@ -1882,7 +1903,7 @@ const TemplateBuilder = () => {
             <div
               id="export-panel"
               data-mtab="export"
-              className={`${mtabCls("export")} scroll-mt-16`}
+              className={`scroll-mt-16${isMobile && mobileTab !== "export" ? " hidden" : ""}`}
             >
               <ExportPanel
                 schedule={schedule}
@@ -1897,10 +1918,8 @@ const TemplateBuilder = () => {
               />
             </div>
             {/* live validation — the same V1–V12 gate that guards the built-ins */}
-            <Card
-              data-mtab="check"
-              className={`border-border bg-card scroll-mt-16 ${mtabCls("check")}`}
-            >
+            {showTab("check") ? (
+            <Card data-mtab="check" className="border-border bg-card scroll-mt-16">
               <CardContent className="space-y-2 p-4">
                 <h2 className="text-sm font-semibold text-foreground">
                   Validation
@@ -1939,14 +1958,13 @@ const TemplateBuilder = () => {
                 </p>
               </CardContent>
             </Card>
+            ) : null}
           </div>
 
           {/* editor column */}
           <div className="min-w-0 space-y-5">
-            <div
-              data-mtab="music"
-              className={`${mtabCls("music")} scroll-mt-16`}
-            >
+            {showTab("music") ? (
+            <div data-mtab="music" className="scroll-mt-16">
             {/* music — a soundtrack, never a clock: a tone preset or an
                 imported song; cuts stay exactly where the creator puts them */}
             <Section
@@ -2239,11 +2257,10 @@ const TemplateBuilder = () => {
               </div>
             </Section>
             </div>
+            ) : null}
 
-            <div
-              data-mtab="slots"
-              className={`${mtabCls("slots")} scroll-mt-16`}
-            >
+            {showTab("slots") ? (
+            <div data-mtab="slots" className="scroll-mt-16">
             {/* the chain — slots with their properties */}
             <Section
               title="Slots"
@@ -2273,11 +2290,7 @@ const TemplateBuilder = () => {
                   (interior grips ripple between neighbours, the end grip
                   changes the total), ruler scrubs the preview */}
               <TimelineStrip
-                slots={draft.slots.map((s, i) => ({
-                  uid: s.uid,
-                  dur: s.dur,
-                  thumb: testMedia[`s${i + 1}`]?.thumb || undefined,
-                }))}
+                slots={stripSlots}
                 selected={draft.slots[selIndex]?.uid ?? null}
                 onSelect={setSelectedSlot}
                 onDurs={applyStripDurs}
@@ -2622,11 +2635,10 @@ const TemplateBuilder = () => {
               </div>
             </Section>
             </div>
+            ) : null}
 
-            <div
-              data-mtab="texts"
-              className={`${mtabCls("texts")} scroll-mt-16`}
-            >
+            {showTab("texts") ? (
+            <div data-mtab="texts" className="scroll-mt-16">
             {/* texts */}
             <Section
               title="Texts"
@@ -2949,11 +2961,10 @@ const TemplateBuilder = () => {
               </div>
             </Section>
             </div>
+            ) : null}
 
-            <div
-              data-mtab="stickers"
-              className={`${mtabCls("stickers")} scroll-mt-16`}
-            >
+            {showTab("stickers") ? (
+            <div data-mtab="stickers" className="scroll-mt-16">
             {/* stickers & logos (D46) — free overlays, draggable on preview */}
             <Section
               title="Logo & stickers"
@@ -3167,11 +3178,10 @@ const TemplateBuilder = () => {
               </div>
             </Section>
             </div>
+            ) : null}
 
-            <div
-              data-mtab="look"
-              className={`${mtabCls("look")} scroll-mt-16`}
-            >
+            {showTab("look") ? (
+            <div data-mtab="look" className="scroll-mt-16">
             {/* look — library card identity */}
             <Section title="Look" hint="How the template appears in the Library.">
               <div className="space-y-3">
@@ -3265,6 +3275,7 @@ const TemplateBuilder = () => {
               </div>
             </Section>
             </div>
+            ) : null}
           </div>
         </div>
       </main>

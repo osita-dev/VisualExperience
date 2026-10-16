@@ -7,7 +7,7 @@
  * frame via direct DOM writes, and every number derives from the draft.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import type { KeyboardEvent as RKeyboardEvent, PointerEvent as RPointerEvent } from "react";
 import { MAX_TOTAL_SEC } from "@/core/model/types";
 import { fmtSec } from "@/lib/format";
@@ -37,7 +37,10 @@ interface Props {
 const TICK_STEPS = [1, 2, 5, 10, 15, 30, 60];
 const r10 = (v: number): number => Math.round(v * 10) / 10;
 
-export function TimelineStrip({
+/* memoized: the builder feeds value-stable props, so edits that don't
+   touch the chain (typing text, music, look) skip this whole subtree —
+   one of the "don't re-render the world" wins of the perf round */
+export const TimelineStrip = memo(function TimelineStrip({
   slots,
   selected,
   onSelect,
@@ -299,4 +302,4 @@ export function TimelineStrip({
       </div>
     </div>
   );
-}
+});

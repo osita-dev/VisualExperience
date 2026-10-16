@@ -1,4 +1,4 @@
-import { useEffect, useRef, type PointerEvent as RPointerEvent } from "react";
+import { useEffect, useRef } from "react";
 import { Pause, Play, RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { Schedule } from "@/core/model/types";
@@ -53,61 +53,73 @@ export function PreviewCanvas({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /* overlay dragging (D46) — paused preview only, topmost layer first */
+  /* overlay dragging (D46) — paused preview only. The gesture lives on
+     invisible per-overlay handles (they carry touch-none), NOT on the
+     canvas: the whole canvas used to be touch-none, which told the browser
+     "never scroll a gesture that starts here" and swallowed thumb scrolling
+     across the entire preview. Now only the small text/sticker regions
+     block scroll (so a drag never turns into a page scroll) — a thumb
+     anywhere else on the preview scrolls the page normally. */
   const dragIdRef = useRef<string | null>(null);
   const dragPropsRef = useRef({ dragOverlays, onOverlayDrag, onOverlayPick, playing });
   dragPropsRef.current = { dragOverlays, onOverlayDrag, onOverlayPick, playing };
 
-  const toNorm = (ev: RPointerEvent<HTMLCanvasElement>) => {
-    const r = ev.currentTarget.getBoundingClientRect();
-    return {
-      x: (ev.clientX - r.left) / r.width,
-      y: (ev.clientY - r.top) / r.height,
-    };
-  };
-  const pickOverlay = (x: number, y: number): string | null => {
-    const list = dragPropsRef.current.dragOverlays ?? [];
-    for (let i = list.length - 1; i >= 0; i--) {
-      const o = list[i];
-      const halfH = (o.size * (9 / 16)) / 2;
-      if (Math.abs(x - o.x) <= o.size / 2 && Math.abs(y - o.y) <= halfH)
-        return o.id;
-    }
-    return null;
+  /* clientX/Y → normalized canvas position (the handles sit on top of the
+     canvas, so the rect always comes from the canvas itself) */
+  const toNorm = (clientX: number, clientY: number) => {
+    const r = canvasRef.current?.getBoundingClientRect();
+    if (!r || !r.width || !r.height) return { x: 0, y: 0 };
+    return { x: (clientX - r.left) / r.width, y: (clientY - r.top) / r.height };
   };
 
   return (
     <div className={className}>
       <div className="relative overflow-hidden rounded-2xl border border-border bg-black shadow-lg">
-        <canvas
-          ref={canvasRef}
-          className="block aspect-[9/16] w-full touch-none"
-          onPointerDown={(ev) => {
-            if (dragPropsRef.current.playing) return;
-            if (!dragPropsRef.current.dragOverlays?.length) return;
-            const { x, y } = toNorm(ev);
-            const id = pickOverlay(x, y);
-            if (!id) return;
-            ev.currentTarget.setPointerCapture(ev.pointerId);
-            dragIdRef.current = id;
-            dragPropsRef.current.onOverlayPick?.(id);
-          }}
-          onPointerMove={(ev) => {
-            if (!dragIdRef.current) return;
-            const { x, y } = toNorm(ev);
-            dragPropsRef.current.onOverlayDrag?.(
-              dragIdRef.current,
-              Math.min(1, Math.max(0, x)),
-              Math.min(1, Math.max(0, y)),
-            );
-          }}
-          onPointerUp={() => {
-            dragIdRef.current = null;
-          }}
-          onPointerCancel={() => {
-            dragIdRef.current = null;
-          }}
-        />
+        <canvas ref={canvasRef} className="block aspect-[9/16] w-full" />
+        {/* drag handles (D46) — exactly the overlay boxes, nothing else.
+            touch-none here keeps a drag from being hijacked as a page
+            scroll; the rest of the canvas stays touchable/scrollable.
+            Topmost overlay wins by DOM order (same as the old hit-test).
+            While playing they don't render → touches pass through. */}
+        {!playing && dragOverlays?.length
+          ? dragOverlays.map((o) => {
+              const wPct = o.size * 100;
+              const hPct = o.size * (9 / 16) * 100;
+              return (
+                <div
+                  key={o.id}
+                  className="absolute touch-none"
+                  style={{
+                    left: `${o.x * 100 - wPct / 2}%`,
+                    top: `${o.y * 100 - hPct / 2}%`,
+                    width: `${wPct}%`,
+                    height: `${hPct}%`,
+                  }}
+                  onPointerDown={(ev) => {
+                    if (dragPropsRef.current.playing) return;
+                    ev.currentTarget.setPointerCapture(ev.pointerId);
+                    dragIdRef.current = o.id;
+                    dragPropsRef.current.onOverlayPick?.(o.id);
+                  }}
+                  onPointerMove={(ev) => {
+                    if (dragIdRef.current !== o.id) return;
+                    const { x, y } = toNorm(ev.clientX, ev.clientY);
+                    dragPropsRef.current.onOverlayDrag?.(
+                      o.id,
+                      Math.min(1, Math.max(0, x)),
+                      Math.min(1, Math.max(0, y)),
+                    );
+                  }}
+                  onPointerUp={() => {
+                    dragIdRef.current = null;
+                  }}
+                  onPointerCancel={() => {
+                    dragIdRef.current = null;
+                  }}
+                />
+              );
+            })
+          : null}
         {controls ? (
           <div className="absolute inset-x-0 bottom-0 flex items-center justify-between gap-2 bg-gradient-to-t from-black/75 via-black/30 to-transparent px-3 pb-2.5 pt-10">
             <div className="flex items-center gap-1.5">
