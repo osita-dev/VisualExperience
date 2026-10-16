@@ -1,0 +1,12 @@
+{
+  "name": "Lovable Stack",
+  "short_name": "Lovable Stack",
+  "description": "",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "orientation": "portrait",
+  "categories": ["education", "productivity"],
+  "lang": "en"
+}

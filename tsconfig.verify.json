@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "noEmit": true,
+    "strict": true,
+    "target": "ES2020",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "baseUrl": ".",
+    "paths": { "@/*": ["./src/*"] },
+    "types": []
+  },
+  "include": [
+    "src/core/**/*.ts",
+    "src/presets/**/*.ts",
+    "src/templates/**/*.ts",
+    "src/lib/format.ts",
+    "src/lib/mediaUtils.ts",
+    "src/player/audio.ts",
+    "src/player/frame.ts",
+    "src/player/synth.ts",
+    "src/exporter/**/*.ts"
+  ]
+}
