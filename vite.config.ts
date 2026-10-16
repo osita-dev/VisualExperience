@@ -49,11 +49,15 @@ export default defineConfig({
       output: {
         /* split the big stable libraries into their own long-cached
            chunks — a route change or an app update no longer re-downloads
-           React/Radix/mediabunny, and the browser loads them in parallel */
+           React/Radix/mediabunny, and the browser loads them in parallel.
+           The groups must form a DAG: the react chunk may not import any
+           other chunk (react-remove-scroll + its helpers live in vendor —
+           putting it in react created a react↔vendor cycle that booted
+           vendor before React initialized → "reading 'forwardRef'"). */
         manualChunks(id: string) {
           if (!id.includes("node_modules")) return undefined
           if (
-            /node_modules[\\/](react|react-dom|react-router|react-remove-scroll|scheduler)[\\/]/.test(
+            /node_modules[\\/](react|react-dom|react-router|scheduler)[\\/]/.test(
               id,
             )
           )

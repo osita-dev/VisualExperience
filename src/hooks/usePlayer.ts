@@ -15,6 +15,19 @@ import {
   type Bindings,
 } from "@/player/frame";
 
+/* preview backing store — one notch lower on weak phones (few cores or
+   little memory): 540×960 instead of 720×1280 = 44% fewer pixels per
+   frame for the same pipeline. The EXPORT renders at its own full size —
+   preview quality may step down, preview ≡ export content never does. */
+const PREVIEW_SIZE: { w: number; h: number } = (() => {
+  if (typeof navigator === "undefined") return { w: 720, h: 1280 };
+  const nav = navigator as Navigator & { deviceMemory?: number };
+  const weak =
+    (nav.deviceMemory !== undefined && nav.deviceMemory <= 4) ||
+    (navigator.hardwareConcurrency ?? 8) <= 4;
+  return weak ? { w: 540, h: 960 } : { w: 720, h: 1280 };
+})();
+
 export interface PlayerHandle {
   play: () => void;
   pause: () => void;
@@ -100,9 +113,12 @@ export function usePlayer(opts: UsePlayerOptions): {
           if (!rendererRef.current) rendererRef.current = new FrameRenderer();
           const ctx = canvas.getContext("2d");
           if (ctx) {
-            if (canvas.width !== 720 || canvas.height !== 1280) {
-              canvas.width = 720;
-              canvas.height = 1280;
+            if (
+              canvas.width !== PREVIEW_SIZE.w ||
+              canvas.height !== PREVIEW_SIZE.h
+            ) {
+              canvas.width = PREVIEW_SIZE.w;
+              canvas.height = PREVIEW_SIZE.h;
             }
             rendererRef.current.render(
               ctx,

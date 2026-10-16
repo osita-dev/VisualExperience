@@ -427,6 +427,29 @@ function scrambleUnit(s: string, seed: number, prog: number): string {
   return out;
 }
 
+/* measure cache — text layout asks for the same strings every single
+   frame; widths never change for a given font+string, so a small LRU
+   turns the per-frame measureText storm into map lookups. This is the
+   biggest CPU cost of animated text on phones. Pixel-identical output:
+   the same font measures the same widths. */
+const MEASURE_MAX = 2048;
+const measureCache = new Map<string, number>();
+function measureW(lc: Ctx2D, text: string): number {
+  const key = `${lc.font} ${text}`;
+  const hit = measureCache.get(key);
+  if (hit !== undefined) return hit;
+  const w = lc.measureText(text).width;
+  if (measureCache.size >= MEASURE_MAX) {
+    let n = MEASURE_MAX >> 2; // drop the oldest quarter (insertion order)
+    for (const k of measureCache.keys()) {
+      measureCache.delete(k);
+      if (--n <= 0) break;
+    }
+  }
+  measureCache.set(key, w);
+  return w;
+}
+
 /** Wrap text into lines, then split into animation units by word/char/line. */
 function layoutTextCh(
   lc: Ctx2D,
@@ -442,14 +465,14 @@ function layoutTextCh(
     let cur = "";
     for (const word of raw.split(" ")) {
       const probe = cur ? `${cur} ${word}` : word;
-      if (cur && lc.measureText(probe).width + trackPx * probe.length > maxW) {
+      if (cur && measureW(lc, probe) + trackPx * probe.length > maxW) {
         lines.push(cur);
         cur = word;
       } else cur = probe;
     }
     lines.push(cur);
   }
-  const spaceW = lc.measureText(" ").width + trackPx;
+  const spaceW = measureW(lc, " ") + trackPx;
   const lineW: number[] = [];
   const units: ChUnit[] = [];
   let nWords = 0;
@@ -460,7 +483,7 @@ function layoutTextCh(
   let gChar = 0;
   for (let li = 0; li < lines.length; li++) {
     const l = lines[li];
-    const w = lc.measureText(l).width + trackPx * l.length;
+    const w = measureW(lc, l) + trackPx * l.length;
     lineW.push(w);
     if (by === "line") {
       units.push({
@@ -474,7 +497,7 @@ function layoutTextCh(
     }
     let x = 0;
     for (const word of l.split(" ")) {
-      const wordW = lc.measureText(word).width + trackPx * word.length;
+      const wordW = measureW(lc, word) + trackPx * word.length;
       if (by === "word") {
         if (word)
           units.push({
@@ -488,7 +511,7 @@ function layoutTextCh(
         x += wordW + spaceW;
       } else {
         for (const ch of word) {
-          const cw = lc.measureText(ch).width + trackPx;
+          const cw = measureW(lc, ch) + trackPx;
           if (ch !== " ")
             units.push({
               text: ch,
@@ -1391,7 +1414,7 @@ export class FrameRenderer {
 
     const label = `SLOT ${item.index + 1} · ${(item.end - item.start).toFixed(1)}s`;
     lc.font = `700 ${VH * 0.026}px Inter, sans-serif`;
-    const w = lc.measureText(label).width + VW * 0.06;
+    const w = measureW(lc, label) + VW * 0.06;
     const h = VH * 0.05;
     lc.fillStyle = "rgba(11, 17, 32, 0.55)";
     lc.beginPath();
