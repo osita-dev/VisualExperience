@@ -22,10 +22,13 @@ import {
   ImagePlus,
   Music2,
   Minus,
+  Palette,
   Plus,
   Redo2,
   Scissors,
+  Sticker,
   Trash2,
+  Type,
   Undo2,
   Upload,
   Volume2,
@@ -324,6 +327,21 @@ function newUid(): string {
 
 /** The 60s total cap, the min slot, and the 0.5s trim step — computed UI. */
 const STEP_SEC = 0.5;
+
+/* mobile bottom-nav tabs (D51) — under the preview, one workbench at a
+   time instead of one endless vertical scroll. Tab order follows the
+   editing flow: build → sound → identity → check → ship. Desktop (md+)
+   keeps the full stacked layout, unchanged. */
+const MOBILE_TABS = [
+  { id: "slots", label: "Slots", Icon: Film },
+  { id: "texts", label: "Text", Icon: Type },
+  { id: "stickers", label: "Sticker", Icon: Sticker },
+  { id: "music", label: "Music", Icon: Music2 },
+  { id: "look", label: "Look", Icon: Palette },
+  { id: "check", label: "Check", Icon: CheckCircle2 },
+  { id: "export", label: "Export", Icon: Download },
+] as const;
+type MobileTab = (typeof MOBILE_TABS)[number]["id"];
 
 /** Clamp a slot length onto the 0.5s grid inside 1..60s. */
 function clampDur(v: number): number {
@@ -1052,6 +1070,8 @@ const TemplateBuilder = () => {
      "leave for now?" confirmation so a pristine open doesn't nag */
   const [dirty, setDirty] = useState(false);
   const [leaveOpen, setLeaveOpen] = useState(false);
+  /* which bottom-nav workbench is open on mobile (D51) */
+  const [mobileTab, setMobileTab] = useState<MobileTab>("slots");
   const lastEditRef = useRef(0);
 
   const commit = useCallback((mutate: (p: Snap) => Snap) => {
@@ -1288,6 +1308,22 @@ const TemplateBuilder = () => {
     }
     setLeaveOpen(true);
   };
+
+  /* bottom-nav tab switch (D51): show the panel and bring it under the
+     sticky header; on desktop (md+) every panel is visible anyway */
+  const selectTab = (id: MobileTab) => {
+    setMobileTab(id);
+    requestAnimationFrame(() => {
+      document
+        .querySelector(`[data-mtab="${id}"]`)
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  };
+  const mtabCls = (id: MobileTab) =>
+    `${mobileTab === id ? "" : "hidden"} md:block`;
+  const isMobileViewport = () =>
+    typeof window !== "undefined" &&
+    window.matchMedia("(max-width: 767.98px)").matches;
 
   /* -------- undo/redo keyboard (fields keep their own native undo) -------- */
   useEffect(() => {
@@ -1691,7 +1727,7 @@ const TemplateBuilder = () => {
   };
 
   return (
-    <div className="flex min-h-screen flex-col bg-background">
+    <div className="flex min-h-screen flex-col bg-background pb-24 md:pb-0">
       {/* header */}
       <header className="sticky top-0 z-40 border-b border-border bg-background/90 backdrop-blur">
         <div className="mx-auto flex max-w-7xl items-center gap-2 px-3 py-2.5 sm:px-6">
@@ -1825,9 +1861,12 @@ const TemplateBuilder = () => {
                   })),
                 ]}
                 onOverlayPick={(id) => {
-                  /* tapping a text on the preview opens it in the panel */
-                  if (draft.texts.some((t) => t.uid === id))
+                  /* tapping a text on the preview opens it in the panel —
+                     on mobile that also flips the bottom nav to Text */
+                  if (draft.texts.some((t) => t.uid === id)) {
                     setSelectedText(id);
+                    if (isMobileViewport()) selectTab("texts");
+                  }
                 }}
                 onOverlayDrag={(id, x, y) => {
                   if (draft.texts.some((t) => t.uid === id))
@@ -1840,7 +1879,11 @@ const TemplateBuilder = () => {
               />
             </div>
             {/* export — the shared panel: same flow as the template page */}
-            <div id="export-panel">
+            <div
+              id="export-panel"
+              data-mtab="export"
+              className={`${mtabCls("export")} scroll-mt-16`}
+            >
               <ExportPanel
                 schedule={schedule}
                 bindings={bindings}
@@ -1854,7 +1897,10 @@ const TemplateBuilder = () => {
               />
             </div>
             {/* live validation — the same V1–V12 gate that guards the built-ins */}
-            <Card className="border-border bg-card">
+            <Card
+              data-mtab="check"
+              className={`border-border bg-card scroll-mt-16 ${mtabCls("check")}`}
+            >
               <CardContent className="space-y-2 p-4">
                 <h2 className="text-sm font-semibold text-foreground">
                   Validation
@@ -1897,6 +1943,10 @@ const TemplateBuilder = () => {
 
           {/* editor column */}
           <div className="min-w-0 space-y-5">
+            <div
+              data-mtab="music"
+              className={`${mtabCls("music")} scroll-mt-16`}
+            >
             {/* music — a soundtrack, never a clock: a tone preset or an
                 imported song; cuts stay exactly where the creator puts them */}
             <Section
@@ -2188,7 +2238,12 @@ const TemplateBuilder = () => {
                 />
               </div>
             </Section>
+            </div>
 
+            <div
+              data-mtab="slots"
+              className={`${mtabCls("slots")} scroll-mt-16`}
+            >
             {/* the chain — slots with their properties */}
             <Section
               title="Slots"
@@ -2566,7 +2621,12 @@ const TemplateBuilder = () => {
                 ) : null}
               </div>
             </Section>
+            </div>
 
+            <div
+              data-mtab="texts"
+              className={`${mtabCls("texts")} scroll-mt-16`}
+            >
             {/* texts */}
             <Section
               title="Texts"
@@ -2888,7 +2948,12 @@ const TemplateBuilder = () => {
                 </Button>
               </div>
             </Section>
+            </div>
 
+            <div
+              data-mtab="stickers"
+              className={`${mtabCls("stickers")} scroll-mt-16`}
+            >
             {/* stickers & logos (D46) — free overlays, draggable on preview */}
             <Section
               title="Logo & stickers"
@@ -3101,7 +3166,12 @@ const TemplateBuilder = () => {
                 ))}
               </div>
             </Section>
+            </div>
 
+            <div
+              data-mtab="look"
+              className={`${mtabCls("look")} scroll-mt-16`}
+            >
             {/* look — library card identity */}
             <Section title="Look" hint="How the template appears in the Library.">
               <div className="space-y-3">
@@ -3194,6 +3264,7 @@ const TemplateBuilder = () => {
                 </p>
               </div>
             </Section>
+            </div>
           </div>
         </div>
       </main>
@@ -3261,6 +3332,40 @@ const TemplateBuilder = () => {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* mobile bottom nav (D51) — one workbench at a time under the
+          preview, so nobody scrolls through every card to reach one;
+          desktop (md+) keeps the full stacked layout */}
+      <nav
+        className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-background/95 backdrop-blur md:hidden"
+        style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+        aria-label="Builder sections"
+      >
+        <div className="grid grid-cols-7">
+          {MOBILE_TABS.map((t) => {
+            const on = mobileTab === t.id;
+            return (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => selectTab(t.id)}
+                aria-current={on ? "page" : undefined}
+                className={`flex flex-col items-center gap-0.5 py-2 text-[10px] transition-colors ${
+                  on ? "text-primary" : "text-muted-foreground"
+                }`}
+              >
+                <span className="relative">
+                  <t.Icon className="h-[18px] w-[18px]" />
+                  {t.id === "check" && issues.length > 0 ? (
+                    <span className="absolute -right-1 -top-0.5 h-2 w-2 rounded-full bg-destructive" />
+                  ) : null}
+                </span>
+                <span className="max-w-full truncate px-0.5">{t.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      </nav>
     </div>
   );
 };
