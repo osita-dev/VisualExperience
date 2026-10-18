@@ -156,9 +156,10 @@ const SlotFiller = () => {
       toast.success(`Filled ${filled} pane${filled === 1 ? "" : "s"}.`);
   };
 
-  /* Composition (D59): the NEXT picks fill this slot's empty panes, in
-     order. A photo the user already chose this session is reused before
-     the gallery is opened again — no extra upload for a split/collage. */
+  /* Composition (D59): empty panes BORROW picks already made — first
+     from other slots' media (nearest slot first), then this session's
+     picks — so a split/collage never means picking again. Nothing is
+     invented; a still-empty pane stays honestly empty and asks. */
   const fillRestPanes = (slot: MediaSlot, pane: number, m: ProbedMedia) => {
     const paneN = paneCount(slot.layout);
     if (paneN <= 1) return 0;
@@ -174,22 +175,37 @@ const SlotFiller = () => {
       if (p !== pane && !busy.has(p)) empties.push(p);
     if (!empties.length) return 0;
 
-    const next = [...sessionMedia];
-    /* never loop the same photo into two panes of one slot */
+    /* donors (D59): picks already sitting in OTHER slots — nearest slot
+       first — then this session's picks. Nothing is invented, and a
+       photo is never looped into two panes of the same slot. */
+    const ids = template.tracks.media.map((s) => s.id);
+    const mine = ids.indexOf(slot.id);
+    const order = ids
+      .map((_, i) => i)
+      .filter((i) => i !== mine)
+      .sort((a, b) => Math.abs(a - mine) - Math.abs(b - mine));
+    const donors: ProbedMedia[] = [];
+    for (const i of order) {
+      const m0 = paneMedia(ids[i], 0)?.media;
+      if (m0) donors.push(m0);
+      const st = project.states[ids[i]];
+      st?.panes?.forEach((p) => {
+        if (p.media) donors.push(p.media);
+      });
+    }
+    for (const c of sessionMedia) donors.push(c);
+
     const used = new Set<string>([m.url]);
     let filled = 0;
     for (const p of empties) {
-      /* an unused pick from this session, else stop and leave the pane
-         honestly empty — we never invent or repeat media */
-      const idx = next.findIndex((c) => !used.has(c.url));
-      if (idx < 0) break;
-      const pick = next[idx];
-      next.splice(idx, 1);
+      /* an already-made pick, else stop and leave the pane honestly
+         empty — we never invent or repeat media */
+      const pick = donors.find((d) => !used.has(d.url));
+      if (!pick) break;
       used.add(pick.url);
       project.setMedia(slot.id, pick, p);
       filled++;
     }
-    setSessionMedia(next);
     return filled;
   };
 

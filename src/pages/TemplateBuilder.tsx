@@ -397,8 +397,8 @@ function maxSecFor(slots: SlotDraft[], index: number): number {
   return Math.max(MIN_SLOT_SEC, MAX_TOTAL_SEC - others);
 }
 
-/* multi-upload cap — the gallery-style flow asks for up to 20 items */
-const BULK_MAX = 20;
+/* multi-upload cap — the gallery-style flow asks for up to 50 items */
+const BULK_MAX = 50;
 
 const DISSOLVE = presetKey("transition.dissolve", 1);
 
@@ -1616,12 +1616,13 @@ const TemplateBuilder = () => {
     [],
   );
 
-  /* -------- multi-upload (up to 20) — the gallery-style path --------
+  /* -------- multi-upload (up to 50) — the gallery-style path --------
      One tap opens the phone's own picker with multi-select (TikTok
      style); every chosen photo/video lands in the chain in order:
      empty slots first, then new slots sized by the same honest rules
      as the workbench (video → its clip length, photo → the default
-     slot), everything clamped into the total budget. One undo step. */
+     slot), everything clamped into the total budget — files that don't
+     fit the 300s cap are honestly reported as skipped. One undo step. */
   const bulkInputRef = useRef<HTMLInputElement>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
 
@@ -2264,6 +2265,55 @@ const TemplateBuilder = () => {
     }
     if (filled > 0)
       toast.success(`Filled ${filled} pane${filled === 1 ? "" : "s"}.`);
+  };
+
+  /* Composition (D59): empty panes BORROW picks already made in other
+     slots — nearest neighbour first — so choosing a split/collage (or
+     picking one file) never forces a second gallery round. Each photo
+     lands in this slot at most once; when the picks run out the pane
+     stays honestly empty and asks. `pending` = a pick that was just
+     made this tick, so it can't be borrowed into a second pane. */
+  const borrowFromOtherPicks = (
+    idx: number,
+    paneN: number,
+    pending?: { key: string; media: ProbedMedia },
+  ): number => {
+    const base = `s${idx + 1}`;
+    if (paneN <= 1 || !draft.slots[idx]) return 0;
+    const read = (p: number): ProbedMedia | undefined => {
+      const k = paneKey(base, p);
+      if (pending && k === pending.key) return pending.media;
+      return testMedia[k];
+    };
+    const used = new Set<string>();
+    const empties: number[] = [];
+    for (let p = 0; p < paneN; p++) {
+      const m = read(p);
+      if (m) used.add(m.url);
+      else empties.push(p);
+    }
+    if (!empties.length) return 0;
+    /* donors: other slots' picks, nearest slot first */
+    const donors: ProbedMedia[] = [];
+    const order = draft.slots
+      .map((_, i) => i)
+      .filter((i) => i !== idx)
+      .sort((a, b) => Math.abs(a - idx) - Math.abs(b - idx));
+    for (const i of order) {
+      const m = testMedia[`s${i + 1}`];
+      if (m) donors.push(m);
+    }
+    let filled = 0;
+    for (const p of empties) {
+      const donor = donors.find((d) => !used.has(d.url));
+      if (!donor) break;
+      used.add(donor.url);
+      const key = paneKey(base, p);
+      setTestMedia((prev) => ({ ...prev, [key]: donor }));
+      setTestTrims((prev) => ({ ...prev, [key]: 0 }));
+      filled++;
+    }
+    return filled;
   };
 
   return (
@@ -3053,12 +3103,21 @@ const TemplateBuilder = () => {
                             value={slot.layout}
                             onValueChange={(v) => {
                               patchSlot(slot.uid, { layout: v });
-                              /* say what just became possible (D56) */
+                              /* Composition (D59): the new panes borrow
+                                 picks already made in other slots, so a
+                                 split/collage never means picking again */
                               const n = paneCount(v);
-                              if (n > 1)
-                                toast(
-                                  `${n} panes — add media to each below (Fill panes picks several at once).`,
+                              if (n > 1) {
+                                const borrowed = borrowFromOtherPicks(
+                                  i,
+                                  n,
                                 );
+                                toast(
+                                  borrowed > 0
+                                    ? `${n} panes — filled ${borrowed} from your existing picks.`
+                                    : `${n} panes — add media to each below (Fill panes picks several at once).`,
+                                );
+                              }
                             }}
                           >
                             <SelectTrigger className="h-9" aria-label="Slot layout">
@@ -4124,7 +4183,19 @@ const TemplateBuilder = () => {
           ) {
             patchSlot(pickerSlotDraft.uid, { dur: sec });
           }
+          /* Composition (D59): one pick in — the remaining empty panes
+             borrow picks already made in other slots, so a split/collage
+             never means a second gallery round */
+          const borrowed = borrowFromOtherPicks(
+            pickerIdx,
+            paneCount(pickerSlot.layout),
+            { key: pickerFor, media: m },
+          );
           setPickerFor(null);
+          if (borrowed > 0)
+            toast.success(
+              `Also filled ${borrowed} pane${borrowed === 1 ? "" : "s"} from your picks.`,
+            );
         }}
       />
 
