@@ -63,7 +63,7 @@ import {
   shuffledIndices,
   type MediaInfo,
 } from "../src/lib/direct";
-import { detectBeat } from "../src/lib/beat";
+import { detectBeat, pickSegment, songProfile } from "../src/lib/beat";
 
 let pass = 0;
 let fail = 0;
@@ -1749,6 +1749,49 @@ check("silence has no beat (honest null)",
   detectBeat(new Float32Array(SR), SR) === null);
 check("a too-short buffer gives up honestly",
   detectBeat(new Float32Array(Math.round(SR * 0.4)), SR) === null);
+
+/* ---------- 25. Song segment picker (auto-placement) ---------- */
+console.log("\n[25] Song segment picker");
+
+/* a 40s synthetic song: 120 BPM clicks, with a LOUD section at 15–30s */
+const segSR = 44100;
+const segSong = new Float32Array(segSR * 40);
+for (let t = 0; t < 40; t += 0.5) {
+  const loud = t >= 15 && t < 30 ? 1 : 0.05;
+  const base = Math.round(t * segSR);
+  for (
+    let i = 0;
+    i < Math.round(0.03 * segSR) && base + i < segSong.length;
+    i++
+  )
+    segSong[base + i] =
+      loud * 0.9 * Math.sin((2 * Math.PI * 1000 * i) / segSR);
+}
+const segProfile = songProfile(segSong, segSR);
+check("song profile reads the beat out of the song",
+  !!segProfile && Math.abs(segProfile.beat.bpm - 120) <= 2,
+  segProfile ? `bpm=${segProfile.beat.bpm.toFixed(2)}` : "null");
+if (segProfile) {
+  const sBeat = 60 / segProfile.beat.bpm;
+  const seg = pickSegment(segProfile, 40, 10);
+  check("picked segment sits on the beat grid",
+    Math.abs(((seg - segProfile.beat.phase) / sBeat) -
+      Math.round((seg - segProfile.beat.phase) / sBeat)) < 1e-6,
+    String(seg));
+  check("picked segment leaves room for the video",
+    seg <= 30 + 1e-9, String(seg));
+  check("picked segment lands in the song's strong section",
+    seg >= 14.5 && seg <= 28.5, String(seg));
+  const tight = pickSegment(segProfile, 40, 39);
+  check("a nearly-full video still gets a fitting segment",
+    tight >= -1e-9 && tight <= 1 + 1e-9, String(tight));
+  check("a song shorter than the video falls back to beat zero",
+    pickSegment(segProfile, 40, 45) === segProfile.beat.phase);
+}
+check("no profile → honest start at 0",
+  pickSegment(null, 40, 10) === 0);
+check("a silent song has no profile",
+  songProfile(new Float32Array(segSR), segSR) === null);
 
 /* ---------- summary ---------- */
 console.log(`\n${"=".repeat(46)}\n  ${pass} passed, ${fail} failed\n${"=".repeat(46)}`);

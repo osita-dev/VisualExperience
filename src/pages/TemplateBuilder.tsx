@@ -143,8 +143,7 @@ import {
   type MediaInfo,
   type Pacing,
 } from "@/lib/direct";
-import { detectBeat } from "@/lib/beat";
-import { getMusicRecord } from "@/hooks/useMusicDB";
+import { pickSegment, songProfile, type SongProfile } from "@/lib/beat";
 import { ingestWithToast } from "@/lib/ingest";
 import {
   disposeMediaBinding,
@@ -1567,48 +1566,28 @@ const TemplateBuilder = () => {
      the lengths it lands on are stored as plain seconds. */
   const [pacingKind, setPacingKind] = useState<Pacing["kind"]>("random");
   const [directBusy, setDirectBusy] = useState(false);
-  const beatCache = useRef(new Map<string, { bpm: number; phase: number }>());
+  const profileCache = useRef(new Map<string, SongProfile | null>());
 
-  /* Beat sync reads the imported song locally (Web Audio decode →
-     onset-envelope tempo estimate — on-device, no service). Returns
-     null, with an honest toast, when there is nothing to sync to. */
-  const resolvePacing = useCallback(async (): Promise<Pacing | null> => {
-    if (pacingKind !== "beats") return { kind: pacingKind };
-    if (!isLocalTrack(draft.track)) {
-      toast("Beat sync follows your song — import one in Music first.");
-      return null;
-    }
-    const fileId = localTrackId(draft.track);
-    setDirectBusy(true);
-    try {
-      let beat = beatCache.current.get(fileId);
-      if (!beat) {
-        const rec = await getMusicRecord(fileId);
-        if (!rec) {
-          toast("That song couldn't be read — re-import it.");
-          return null;
-        }
-        const ctx = new AudioContext();
-        try {
-          const buf = await ctx.decodeAudioData(await rec.blob.arrayBuffer());
-          const found = detectBeat(buf.getChannelData(0), buf.sampleRate);
-          if (!found) {
-            toast(
-              "Couldn't hear a steady beat in that song — try Random pacing.",
-            );
-            return null;
-          }
-          beat = found;
-          beatCache.current.set(fileId, beat);
-        } finally {
-          ctx.close();
-        }
+  /* Beat sync reads the imported song locally — the player already keeps
+     its decoded buffer; one pass builds the onset envelope, and both the
+     beat AND the segment picker are read from it. Cached per song. */
+  const ensureProfile = useCallback(
+    async (fileId: string, track: string): Promise<SongProfile | null> => {
+      if (profileCache.current.has(fileId))
+        return profileCache.current.get(fileId) ?? null;
+      let buf = audio.getTrack(track);
+      if (!buf) {
+        const ok = await ensureLocalMusic(track);
+        buf = ok ? audio.getTrack(track) : undefined;
       }
-      return { kind: "beats", ...beat, songStart: draft.songStart };
-    } finally {
-      setDirectBusy(false);
-    }
-  }, [draft.track, draft.songStart, pacingKind]);
+      const profile = buf
+        ? songProfile(buf.getChannelData(0), buf.sampleRate)
+        : null;
+      profileCache.current.set(fileId, profile);
+      return profile;
+    },
+    [],
+  );
 
   /* -------- multi-upload (up to 20) — the gallery-style path --------
      One tap opens the phone's own picker with multi-select (TikTok
@@ -1704,10 +1683,42 @@ const TemplateBuilder = () => {
         /* AUTO-DIRECT: the system dresses what just arrived — punchy
            durations inside the budget, a varied cut, look, motion and a
            random SFX — scoped to the slots this batch touched, so any
-           earlier tuning is left alone. Music: never. Pacing: whatever
-           the bar is set to (falls back to Random if beat sync has no
-           song — the batch still lands). */
-        const pacing = (await resolvePacing()) ?? { kind: "random" as const };
+           earlier tuning is left alone. Pacing: whatever the bar is set
+           to; with Beat sync the system also re-picks WHERE the song
+           plays (a strong beat that still covers the chain) and the
+           cuts follow that grid. No song / no beat → honest toast, the
+           batch still lands with Random pacing. */
+        let pacing: Pacing = { kind: "random" };
+        let bulkSongStart: number | null = null;
+        if (pacingKind === "beats") {
+          if (isLocalTrack(draft.track) && draft.local) {
+            const profile = await ensureProfile(
+              localTrackId(draft.track),
+              draft.track,
+            );
+            if (profile) {
+              /* needSec ≈ the chain as planned — dressing only shrinks it */
+              const needSec = nextSlots.reduce((a, s) => a + s.dur, 0);
+              bulkSongStart = pickSegment(
+                profile,
+                draft.local.duration,
+                needSec,
+              );
+              pacing = {
+                kind: "beats",
+                bpm: profile.beat.bpm,
+                phase: profile.beat.phase,
+                songStart: bulkSongStart,
+              };
+            } else {
+              toast("Couldn't hear a steady beat — using Random pacing.");
+            }
+          } else {
+            toast(
+              "Import a song for Beat sync — this batch used Random pacing.",
+            );
+          }
+        }
         const mediaFor = (i: number): MediaInfo | undefined => {
           const m = mediaAdd[`s${i + 1}`] ?? testMedia[`s${i + 1}`];
           return m ? { isVideo: m.isVideo, duration: m.duration } : undefined;
@@ -1723,6 +1734,7 @@ const TemplateBuilder = () => {
         setDraft((d) => ({
           ...d,
           slots: directed.slots,
+          songStart: bulkSongStart ?? d.songStart,
           texts: durChanged
             ? d.texts.map((t) => clampTextWin(t, totalSecOf(directed.slots)))
             : d.texts,
@@ -1748,7 +1760,18 @@ const TemplateBuilder = () => {
         setBulkBusy(false);
       }
     },
-    [bulkBusy, draft.slots, testMedia, setDraft, setTestMedia, setTestTrims, resolvePacing],
+    [
+      bulkBusy,
+      draft.slots,
+      draft.track,
+      draft.local,
+      pacingKind,
+      testMedia,
+      setDraft,
+      setTestMedia,
+      setTestTrims,
+      ensureProfile,
+    ],
   );
 
   /* -------- AUTO-DIRECT bar — the system picks, the user shuffles --------
@@ -1771,10 +1794,41 @@ const TemplateBuilder = () => {
     /* pacing only matters where durations get re-picked — look, motion
        and cuts never touch lengths, so they never wait on a song */
     let pacing: Pacing = { kind: "random" };
+    let newSongStart: number | null = null;
     if (kind === "order" || kind === "direct") {
-      const resolved = await resolvePacing();
-      if (!resolved) return; // honest toast already shown
-      pacing = resolved;
+      if (pacingKind === "beats") {
+        if (!isLocalTrack(draft.track) || !draft.local) {
+          toast("Beat sync follows your song — import one in Music first.");
+          return;
+        }
+        setDirectBusy(true);
+        let profile: SongProfile | null = null;
+        try {
+          profile = await ensureProfile(
+            localTrackId(draft.track),
+            draft.track,
+          );
+        } finally {
+          setDirectBusy(false);
+        }
+        if (!profile) {
+          toast(
+            "Couldn't hear a steady beat in that song — try Random pacing.",
+          );
+          return;
+        }
+        /* the system re-picks WHERE the song plays — a strong beat that
+           still covers the chain — and the cuts follow that grid */
+        newSongStart = pickSegment(profile, draft.local.duration, totalSec);
+        pacing = {
+          kind: "beats",
+          bpm: profile.beat.bpm,
+          phase: profile.beat.phase,
+          songStart: newSongStart,
+        };
+      } else {
+        pacing = { kind: pacingKind };
+      }
     }
 
     if (kind === "order") {
@@ -1810,6 +1864,7 @@ const TemplateBuilder = () => {
       setDraft((d) => ({
         ...d,
         slots: directed.slots,
+        songStart: newSongStart ?? d.songStart,
         texts: d.texts.map((t) => clampTextWin(t, totalSecOf(directed.slots))),
       }));
       toast.success("Order shuffled.");
@@ -1824,6 +1879,7 @@ const TemplateBuilder = () => {
       setDraft((d) => ({
         ...d,
         slots: directed.slots,
+        songStart: newSongStart ?? d.songStart,
         texts: texts.map((t) =>
           clampTextWin(t, totalSecOf(directed.slots)),
         ),
@@ -1996,15 +2052,23 @@ const TemplateBuilder = () => {
       }
       releaseLocalMusic();
       // the fileId-driven effect above registers the track with the engine
+      /* the system immediately places WHERE it plays: a strong, beat-
+         locked spot that covers the current chain — the slider stays
+         for fine-tuning (the profile is cached for Beat sync too) */
+      const profile = songProfile(buf.getChannelData(0), buf.sampleRate);
+      profileCache.current.set(fileId, profile);
+      const start = pickSegment(profile, buf.duration, totalSec);
       setDraft((d) => ({
         ...d,
         track: `local:${fileId}`,
         local: { fileId, name: file.name, duration: buf.duration },
         songOn: true,
-        songStart: 0,
+        songStart: start,
       }));
       toast.success(
-        `"${file.name}" imported — ${fmtSec(buf.duration)} on this device.`,
+        start > 0.05
+          ? `"${file.name}" imported — placed on a strong beat (slide to adjust).`
+          : `"${file.name}" imported — ${fmtSec(buf.duration)} on this device.`,
       );
     } finally {
       setImporting(false);
@@ -2020,6 +2084,24 @@ const TemplateBuilder = () => {
       songStart: 0,
     }));
     toast.success("Imported song removed — the template is silent.");
+  };
+
+  /* re-roll WHERE the song plays: a fresh strong, beat-locked spot for
+     the current chain — the manual slider stays for fine-tuning */
+  const autoPickSegment = async () => {
+    if (!isLocalTrack(draft.track) || !draft.local) return;
+    setDirectBusy(true);
+    try {
+      const profile = await ensureProfile(
+        localTrackId(draft.track),
+        draft.track,
+      );
+      const start = pickSegment(profile, draft.local.duration, totalSec);
+      setDraft((d) => ({ ...d, songStart: start }));
+      toast.success("Placed on a strong beat — slide to fine-tune.");
+    } finally {
+      setDirectBusy(false);
+    }
   };
 
   /* -------- render -------- */
@@ -2436,14 +2518,29 @@ const TemplateBuilder = () => {
                         }
                         format={fmtSec}
                       />
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => localFileRef.current?.click()}
-                      >
-                        <Upload className="mr-1.5 h-3.5 w-3.5" />
-                        Replace song
-                      </Button>
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={directBusy}
+                          onClick={() => void autoPickSegment()}
+                        >
+                          {directBusy ? (
+                            <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Wand2 className="mr-1.5 h-3.5 w-3.5" />
+                          )}
+                          Auto-pick segment
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => localFileRef.current?.click()}
+                        >
+                          <Upload className="mr-1.5 h-3.5 w-3.5" />
+                          Replace song
+                        </Button>
+                      </div>
                     </div>
                   ) : (
                     <button
