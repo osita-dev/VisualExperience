@@ -20,6 +20,7 @@ import {
   Download,
   Film,
   ImagePlus,
+  Loader2,
   Music2,
   Minus,
   Palette,
@@ -124,6 +125,7 @@ import { TEXT_EXITS, TEXT_FAMILIES } from "@/presets/textCatalog";
 import { fmtSec } from "@/lib/format";
 import { probeFile } from "@/lib/mediaUtils";
 import type { ProbedMedia } from "@/lib/mediaUtils";
+import { ingestWithToast } from "@/lib/ingest";
 import {
   disposeMediaBinding,
   makeMediaBinding,
@@ -369,6 +371,9 @@ function maxSecFor(slots: SlotDraft[], index: number): number {
   );
   return Math.max(MIN_SLOT_SEC, MAX_TOTAL_SEC - others);
 }
+
+/* multi-upload cap — the gallery-style flow asks for up to 20 items */
+const BULK_MAX = 20;
 
 const DISSOLVE = presetKey("transition.dissolve", 1);
 
@@ -1537,6 +1542,126 @@ const TemplateBuilder = () => {
       };
     });
 
+  /* -------- multi-upload (up to 20) — the gallery-style path --------
+     One tap opens the phone's own picker with multi-select (TikTok
+     style); every chosen photo/video lands in the chain in order:
+     empty slots first, then new slots sized by the same honest rules
+     as the workbench (video → its clip length, photo → the default
+     slot), everything clamped into the 60s budget. One undo step. */
+  const bulkInputRef = useRef<HTMLInputElement>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
+
+  const bulkAddMedia = useCallback(
+    async (files: FileList | null) => {
+      const picked = Array.from(files ?? [])
+        .filter(
+          (f) => f.type.startsWith("image/") || f.type.startsWith("video/"),
+        )
+        .slice(0, BULK_MAX);
+      if (!picked.length || bulkBusy) return;
+      setBulkBusy(true);
+      try {
+        /* probe one file at a time — on-device video conversion is heavy */
+        const probed: ProbedMedia[] = [];
+        for (const f of picked) {
+          try {
+            probed.push(await ingestWithToast(f));
+          } catch {
+            /* ingestWithToast already showed the honest error */
+          }
+        }
+        if (!probed.length) return;
+
+        /* plan against the chain as it is right now */
+        const baseSlots = draft.slots.map((s) => ({ ...s }));
+        const nextSlots = [...baseSlots];
+        const claimed = new Set<number>();
+        const hasMedia = (i: number) => testMedia[`s${i + 1}`] !== undefined;
+        const room = () =>
+          MAX_TOTAL_SEC - nextSlots.reduce((a, s) => a + s.dur, 0);
+        const mediaAdd: Record<string, ProbedMedia> = {};
+        let firstUid: string | null = null;
+        let added = 0;
+        let skipped = 0;
+
+        for (const m of probed) {
+          let idx = nextSlots.findIndex(
+            (_, i) => i < baseSlots.length && !hasMedia(i) && !claimed.has(i),
+          );
+          if (idx === -1) {
+            /* no empty slot — append one if the budget allows */
+            if (room() < MIN_SLOT_SEC) {
+              skipped++;
+              continue;
+            }
+            const dur = m.isVideo
+              ? Math.min(Math.max(MIN_SLOT_SEC, m.duration), room())
+              : Math.min(DEFAULT_SLOT_SEC, room());
+            nextSlots.push({
+              uid: newUid(),
+              dur,
+              effect: "none",
+              vanim: "none",
+              filterSel: "template",
+              filterAmount: 0.7,
+              transitionIn: DISSOLVE,
+              soundCut: SOUND_OFF,
+              soundEffect: SOUND_AUTO,
+              soundTransition: SOUND_AUTO,
+            });
+            idx = nextSlots.length - 1;
+          } else if (m.isVideo) {
+            /* a fresh clip takes its own length, budget-capped (D49) */
+            const others = nextSlots.reduce(
+              (a, s, i) => (i === idx ? a : a + s.dur),
+              0,
+            );
+            const cap = Math.max(MIN_SLOT_SEC, MAX_TOTAL_SEC - others);
+            nextSlots[idx] = {
+              ...nextSlots[idx],
+              dur: Math.min(Math.max(MIN_SLOT_SEC, m.duration), cap),
+            };
+          }
+          claimed.add(idx);
+          mediaAdd[`s${idx + 1}`] = m;
+          if (firstUid === null) firstUid = nextSlots[idx].uid;
+          added++;
+        }
+
+        if (added === 0) {
+          toast("Nothing fit — the 60s budget is full.");
+          return;
+        }
+        const durChanged = nextSlots.some(
+          (s, i) => s.dur !== baseSlots[i]?.dur,
+        );
+        setDraft((d) => ({
+          ...d,
+          slots: nextSlots,
+          texts: durChanged
+            ? d.texts.map((t) => clampTextWin(t, totalSecOf(nextSlots)))
+            : d.texts,
+        }));
+        setTestMedia((prev) => ({ ...prev, ...mediaAdd }));
+        setTestTrims((prev) => {
+          const next = { ...prev };
+          /* a fresh clip always starts at its beginning */
+          for (const k of Object.keys(mediaAdd)) next[k] = 0;
+          return next;
+        });
+        if (firstUid) setSelectedSlot(firstUid);
+        toast.success(
+          skipped > 0
+            ? `Added ${added} — ${skipped} skipped, the 60s budget is full.`
+            : `Added ${added} to your chain.`,
+        );
+      } finally {
+        setBulkBusy(false);
+      }
+    },
+    [bulkBusy, draft.slots, testMedia, setDraft, setTestMedia, setTestTrims],
+  );
+
   const removeSlot = (uid: string) =>
     setDraft((d) => {
       if (d.slots.length <= 1) return d;
@@ -2617,15 +2742,44 @@ const TemplateBuilder = () => {
                   );
                 })()}
 
-                <Button
-                  variant="outline"
-                  className="w-full border-dashed"
-                  disabled={atCap}
-                  onClick={addSlot}
-                >
-                  <Plus className="mr-2 h-4 w-4" />
-                  Add slot ({DEFAULT_SLOT_SEC}s)
-                </Button>
+                {/* the fast path: one tap → the phone's own gallery with
+                    multi-select — every pick lands in the chain in order */}
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <Button
+                    className="bg-primary text-primary-foreground hover:bg-primary/90"
+                    disabled={bulkBusy}
+                    onClick={() => bulkInputRef.current?.click()}
+                  >
+                    {bulkBusy ? (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    ) : (
+                      <Upload className="mr-2 h-4 w-4" />
+                    )}
+                    {bulkBusy
+                      ? "Preparing media…"
+                      : `Add media (up to ${BULK_MAX})`}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className="border-dashed"
+                    disabled={atCap}
+                    onClick={addSlot}
+                  >
+                    <Plus className="mr-2 h-4 w-4" />
+                    Add slot ({DEFAULT_SLOT_SEC}s)
+                  </Button>
+                </div>
+                <input
+                  ref={bulkInputRef}
+                  type="file"
+                  accept="image/*,video/*"
+                  multiple
+                  className="hidden"
+                  onChange={(e) => {
+                    void bulkAddMedia(e.target.files);
+                    e.target.value = "";
+                  }}
+                />
                 {atCap ? (
                   <p className="text-center text-[11px] text-muted-foreground">
                     Total length cap reached ({MAX_TOTAL_SEC}s) — shorten or
