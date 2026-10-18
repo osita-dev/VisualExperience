@@ -87,7 +87,7 @@ function checkShape(raw: unknown, issues: ValidationIssue[]): void {
     push(issues, "shape", "userMay must be an array");
 }
 
-/** Slot lengths valid + chain non-empty + connections between adjacent slots (V2/V3), plus the 60s total budget (V12). */
+/** Slot lengths valid + chain non-empty + connections between adjacent slots (V2/V3), plus the total budget (V12, MAX_TOTAL_SEC). */
 function checkMediaChain(t: Template, issues: ValidationIssue[]): void {
   const media = t.tracks.media;
   const total = media.reduce((m, s) => m + (isNum(s.dur) ? s.dur : 0), 0);

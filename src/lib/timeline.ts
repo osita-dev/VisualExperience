@@ -2,7 +2,7 @@
  * Timeline-trim math for the builder's strip (Step 2). The chain is
  * contiguous — dragging the cut between two slots ripples the seconds
  * from one to the other (total untouched); dragging the end of the chain
- * grows or shrinks it inside the 1..60s budget. Pure: covered by
+ * grows or shrinks it inside the 1..MAX_TOTAL_SEC budget. Pure: covered by
  * scripts/verify-core.ts, no DOM, no React.
  *
  * Boundary numbering: 1..durs.length (1 = first cut … n = end of chain).

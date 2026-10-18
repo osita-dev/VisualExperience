@@ -3,7 +3,7 @@
  * photo or video, preview the exact 9:16 crop (with playback), and add
  * it with the slot's length taken from the clip's own duration
  * ("40.3s clip → 40.3s slot" — every number computed, never typed),
- * capped by the remaining total budget (60s). No network, no services.
+ * capped by the remaining total budget (MAX_TOTAL_SEC). No network, no services.
  * The viewer slot-filler keeps its own pick-a-window dialog.
  */
 
@@ -19,6 +19,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import type { MediaSlot } from "@/core/model/types";
+import { MAX_TOTAL_SEC } from "@/core/model/types";
 import { mediaWarnings, type ProbedMedia } from "@/lib/mediaUtils";
 import { ingestWithToast } from "@/lib/ingest";
 import { fmtSec } from "@/lib/format";
@@ -221,8 +222,8 @@ export function MediaWorkbench({
                   </div>
                   {rawSec > videoSec ? (
                     <p className="text-[11px] text-muted-foreground">
-                      Capped by the 60s total budget — shorten another slot
-                      first if you need more.
+                      Capped by the {MAX_TOTAL_SEC}s total budget — shorten
+                      another slot first if you need more.
                     </p>
                   ) : null}
                 </div>

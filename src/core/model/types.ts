@@ -5,7 +5,7 @@
  * schemaVersion 2 — the UNLOCKED model: music no longer sets a BPM, cuts are
  * not forced onto a beat grid, and every length is plain seconds. A media
  * slot carries its own `dur`; text/image overlays carry absolute `time`
- * windows. Template totals are bounded by MAX_TOTAL_SEC (60s).
+ * windows. Template totals are bounded by MAX_TOTAL_SEC (300s = 5 min).
  */
 
 /* ------------------------------------------------------------------ *
@@ -16,8 +16,10 @@
 export const MIN_SLOT_SEC = 1;
 /** Default length for a new or empty slot — 10 seconds. */
 export const DEFAULT_SLOT_SEC = 10;
-/** The whole video's length budget (V12): the sum of slot durs. */
-export const MAX_TOTAL_SEC = 60;
+/** The whole video's length budget (V12): the sum of slot durs.
+ * 300s = 5 minutes (raised from 60s for bulk uploads / auto-direct;
+ * going longer is a later conversation). */
+export const MAX_TOTAL_SEC = 300;
 
 /* ------------------------------------------------------------------ *
  * Presets

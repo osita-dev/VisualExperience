@@ -1,6 +1,6 @@
 /**
  * THE CREATOR BUILDER (v2, D37) — front end B: click-to-assemble templates.
- * The UNLOCKED model: the chain is plain seconds (10s per slot, 60s total
+ * The UNLOCKED model: the chain is plain seconds (10s per slot, 300s total
  * cap) and music is a soundtrack — a tone preset or an imported song —
  * that never drives the cuts. The draft resolves through the same engine
  * and the same validation gate (V1–V12) as the built-in library —
@@ -13,6 +13,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   AlertTriangle,
   ArrowLeft,
+  ArrowRightLeft,
   Check,
   CheckCircle2,
   ChevronDown,
@@ -27,12 +28,15 @@ import {
   Plus,
   Redo2,
   Scissors,
+  Shuffle,
+  Sparkles,
   Sticker,
   Trash2,
   Type,
   Undo2,
   Upload,
   Volume2,
+  Wand2,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -125,6 +129,22 @@ import { TEXT_EXITS, TEXT_FAMILIES } from "@/presets/textCatalog";
 import { fmtSec } from "@/lib/format";
 import { probeFile } from "@/lib/mediaUtils";
 import type { ProbedMedia } from "@/lib/mediaUtils";
+import {
+  RAMP_END_SEC,
+  RAMP_START_SEC,
+  UNIFORM_SEC,
+  directAll,
+  directDurations,
+  directLook,
+  directMotion,
+  directTexts,
+  directTransitions,
+  shuffledIndices,
+  type MediaInfo,
+  type Pacing,
+} from "@/lib/direct";
+import { detectBeat } from "@/lib/beat";
+import { getMusicRecord } from "@/hooks/useMusicDB";
 import { ingestWithToast } from "@/lib/ingest";
 import {
   disposeMediaBinding,
@@ -167,7 +187,7 @@ import {
 
 interface SlotDraft {
   uid: string;
-  /** slot length in seconds (0.5 grid, 1..60) */
+  /** slot length in seconds (0.5 grid, 1..MAX_TOTAL_SEC) */
   dur: number;
   /** preset key or "none" */
   effect: string;
@@ -329,7 +349,7 @@ function newUid(): string {
   return `d${Date.now().toString(36)}-${uidCounter}`;
 }
 
-/** The 60s total cap, the min slot, and the 0.5s trim step — computed UI. */
+/** The total cap, the min slot, and the 0.5s trim step — computed UI. */
 const STEP_SEC = 0.5;
 
 /* mobile bottom-nav tabs (D51) — under the preview, one workbench at a
@@ -353,7 +373,7 @@ const PERF_FLAG =
   typeof window !== "undefined" &&
   new URLSearchParams(window.location.search).get("debug") === "1";
 
-/** Clamp a slot length onto the 0.5s grid inside 1..60s. */
+/** Clamp a slot length onto the 0.5s grid inside 1..MAX_TOTAL_SEC. */
 function clampDur(v: number): number {
   return Math.min(MAX_TOTAL_SEC, Math.max(MIN_SLOT_SEC, Math.round(v * 2) / 2));
 }
@@ -363,7 +383,7 @@ function totalSecOf(slots: SlotDraft[]): number {
   return slots.reduce((a, s) => a + s.dur, 0);
 }
 
-/** How far a slot may grow: the 60s total minus everything else. */
+/** How far a slot may grow: the total cap minus everything else. */
 function maxSecFor(slots: SlotDraft[], index: number): number {
   const others = slots.reduce(
     (a, s, i) => (i === index ? a : a + s.dur),
@@ -1542,12 +1562,60 @@ const TemplateBuilder = () => {
       };
     });
 
+  /* -------- timing (pacing) — the director's chosen clock --------
+     A mode of the DIRECTOR, not of the template: whatever pacing picks,
+     the lengths it lands on are stored as plain seconds. */
+  const [pacingKind, setPacingKind] = useState<Pacing["kind"]>("random");
+  const [directBusy, setDirectBusy] = useState(false);
+  const beatCache = useRef(new Map<string, { bpm: number; phase: number }>());
+
+  /* Beat sync reads the imported song locally (Web Audio decode →
+     onset-envelope tempo estimate — on-device, no service). Returns
+     null, with an honest toast, when there is nothing to sync to. */
+  const resolvePacing = useCallback(async (): Promise<Pacing | null> => {
+    if (pacingKind !== "beats") return { kind: pacingKind };
+    if (!isLocalTrack(draft.track)) {
+      toast("Beat sync follows your song — import one in Music first.");
+      return null;
+    }
+    const fileId = localTrackId(draft.track);
+    setDirectBusy(true);
+    try {
+      let beat = beatCache.current.get(fileId);
+      if (!beat) {
+        const rec = await getMusicRecord(fileId);
+        if (!rec) {
+          toast("That song couldn't be read — re-import it.");
+          return null;
+        }
+        const ctx = new AudioContext();
+        try {
+          const buf = await ctx.decodeAudioData(await rec.blob.arrayBuffer());
+          const found = detectBeat(buf.getChannelData(0), buf.sampleRate);
+          if (!found) {
+            toast(
+              "Couldn't hear a steady beat in that song — try Random pacing.",
+            );
+            return null;
+          }
+          beat = found;
+          beatCache.current.set(fileId, beat);
+        } finally {
+          ctx.close();
+        }
+      }
+      return { kind: "beats", ...beat, songStart: draft.songStart };
+    } finally {
+      setDirectBusy(false);
+    }
+  }, [draft.track, draft.songStart, pacingKind]);
+
   /* -------- multi-upload (up to 20) — the gallery-style path --------
      One tap opens the phone's own picker with multi-select (TikTok
      style); every chosen photo/video lands in the chain in order:
      empty slots first, then new slots sized by the same honest rules
      as the workbench (video → its clip length, photo → the default
-     slot), everything clamped into the 60s budget. One undo step. */
+     slot), everything clamped into the total budget. One undo step. */
   const bulkInputRef = useRef<HTMLInputElement>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
 
@@ -1629,38 +1697,165 @@ const TemplateBuilder = () => {
         }
 
         if (added === 0) {
-          toast("Nothing fit — the 60s budget is full.");
+          toast(`Nothing fit — the ${MAX_TOTAL_SEC}s budget is full.`);
           return;
         }
-        const durChanged = nextSlots.some(
+
+        /* AUTO-DIRECT: the system dresses what just arrived — punchy
+           durations inside the budget, a varied cut, look, motion and a
+           random SFX — scoped to the slots this batch touched, so any
+           earlier tuning is left alone. Music: never. Pacing: whatever
+           the bar is set to (falls back to Random if beat sync has no
+           song — the batch still lands). */
+        const pacing = (await resolvePacing()) ?? { kind: "random" as const };
+        const mediaFor = (i: number): MediaInfo | undefined => {
+          const m = mediaAdd[`s${i + 1}`] ?? testMedia[`s${i + 1}`];
+          return m ? { isVideo: m.isVideo, duration: m.duration } : undefined;
+        };
+        const directed = directAll(
+          nextSlots,
+          nextSlots.map((_, i) => mediaFor(i)),
+          { only: [...claimed], pacing },
+        );
+        const durChanged = directed.slots.some(
           (s, i) => s.dur !== baseSlots[i]?.dur,
         );
         setDraft((d) => ({
           ...d,
-          slots: nextSlots,
+          slots: directed.slots,
           texts: durChanged
-            ? d.texts.map((t) => clampTextWin(t, totalSecOf(nextSlots)))
+            ? d.texts.map((t) => clampTextWin(t, totalSecOf(directed.slots)))
             : d.texts,
         }));
         setTestMedia((prev) => ({ ...prev, ...mediaAdd }));
         setTestTrims((prev) => {
           const next = { ...prev };
-          /* a fresh clip always starts at its beginning */
-          for (const k of Object.keys(mediaAdd)) next[k] = 0;
+          /* a fresh clip starts at its directed spot — a random point
+             inside the clip, stored as the trim (preview ≡ export) */
+          for (const i of claimed) {
+            const t = directed.trims[i];
+            if (t !== null) next[`s${i + 1}`] = t;
+          }
           return next;
         });
         if (firstUid) setSelectedSlot(firstUid);
         toast.success(
           skipped > 0
-            ? `Added ${added} — ${skipped} skipped, the 60s budget is full.`
-            : `Added ${added} to your chain.`,
+            ? `Added ${added} — ${skipped} skipped, the ${MAX_TOTAL_SEC}s budget is full.`
+            : `Added ${added} — auto-directed. Shuffle to re-roll.`,
         );
       } finally {
         setBulkBusy(false);
       }
     },
-    [bulkBusy, draft.slots, testMedia, setDraft, setTestMedia, setTestTrims],
+    [bulkBusy, draft.slots, testMedia, setDraft, setTestMedia, setTestTrims, resolvePacing],
   );
+
+  /* -------- AUTO-DIRECT bar — the system picks, the user shuffles --------
+     Each button is ONE undo step and re-rolls only its own category:
+     Re-direct = durations + look + motion + cuts + sounds + text anims;
+     the rest touch just their field. Music is never touched. */
+  const filledCount = draft.slots.filter(
+    (_, i) => testMedia[`s${i + 1}`] !== undefined,
+  ).length;
+
+  const runDirector = async (
+    kind: "direct" | "order" | "look" | "motion" | "transitions",
+  ) => {
+    const slots = draft.slots;
+    const mediaAt = (i: number): MediaInfo | undefined => {
+      const m = testMedia[`s${i + 1}`];
+      return m ? { isVideo: m.isVideo, duration: m.duration } : undefined;
+    };
+
+    /* pacing only matters where durations get re-picked — look, motion
+       and cuts never touch lengths, so they never wait on a song */
+    let pacing: Pacing = { kind: "random" };
+    if (kind === "order" || kind === "direct") {
+      const resolved = await resolvePacing();
+      if (!resolved) return; // honest toast already shown
+      pacing = resolved;
+    }
+
+    if (kind === "order") {
+      /* permute the FILLED positions — media and clip travel together,
+         then durations re-derive for wherever each clip landed */
+      const filled = slots
+        .map((_, i) => i)
+        .filter((i) => testMedia[`s${i + 1}`] !== undefined);
+      if (filled.length < 2) return;
+      const perm = shuffledIndices(filled.length);
+      const nextMedia: Record<string, ProbedMedia> = {};
+      filled.forEach((pos, k) => {
+        const m = testMedia[`s${filled[perm[k]] + 1}`];
+        if (m) nextMedia[`s${pos + 1}`] = m;
+      });
+      const directed = directDurations(
+        slots,
+        slots.map((_, i) => {
+          const m = nextMedia[`s${i + 1}`];
+          return m ? { isVideo: m.isVideo, duration: m.duration } : undefined;
+        }),
+        { pacing },
+      );
+      setTestMedia((prev) => ({ ...prev, ...nextMedia }));
+      setTestTrims((prev) => {
+        const next = { ...prev };
+        for (let i = 0; i < directed.slots.length; i++) {
+          const t = directed.trims[i];
+          if (t !== null) next[`s${i + 1}`] = t;
+        }
+        return next;
+      });
+      setDraft((d) => ({
+        ...d,
+        slots: directed.slots,
+        texts: d.texts.map((t) => clampTextWin(t, totalSecOf(directed.slots))),
+      }));
+      toast.success("Order shuffled.");
+      return;
+    }
+
+    if (kind === "direct") {
+      const directed = directAll(slots, slots.map((_, i) => mediaAt(i)), {
+        pacing,
+      });
+      const texts = directTexts(draft.texts);
+      setDraft((d) => ({
+        ...d,
+        slots: directed.slots,
+        texts: texts.map((t) =>
+          clampTextWin(t, totalSecOf(directed.slots)),
+        ),
+      }));
+      setTestTrims((prev) => {
+        const next = { ...prev };
+        for (let i = 0; i < directed.slots.length; i++) {
+          const t = directed.trims[i];
+          if (t !== null) next[`s${i + 1}`] = t;
+        }
+        return next;
+      });
+      toast.success("Re-directed — durations, look, motion, cuts, sounds.");
+      return;
+    }
+
+    const dressed =
+      kind === "look"
+        ? directLook(slots)
+        : kind === "motion"
+          ? directMotion(slots)
+          : directTransitions(slots);
+    const texts = kind === "motion" ? directTexts(draft.texts) : draft.texts;
+    setDraft((d) => ({ ...d, slots: dressed, texts }));
+    toast.success(
+      kind === "look"
+        ? "Look shuffled."
+        : kind === "motion"
+          ? "Motion shuffled."
+          : "Transitions shuffled.",
+    );
+  };
 
   const removeSlot = (uid: string) =>
     setDraft((d) => {
@@ -1855,7 +2050,7 @@ const TemplateBuilder = () => {
   }
 
   // the workbench derives a slot's length from the kept clip (D49) —
-  // its growth room is the same 60s cap the length stepper enforces
+  // its growth room is the same total cap the length stepper enforces
   const pickerIdx = pickerFor ? Number(pickerFor.slice(1)) - 1 : -1;
   const pickerSlotDraft = draft.slots[pickerIdx];
   const pickerSec = pickerSlotDraft?.dur ?? DEFAULT_SLOT_SEC;
@@ -2389,7 +2584,7 @@ const TemplateBuilder = () => {
             {/* the chain — slots with their properties */}
             <Section
               title="Slots"
-              hint="Tap a clip in the strip to edit it — the panel below shows that slot's length, effects, filter, sounds and test media. Drag the grips on the strip to trim, up to the 60s total."
+              hint={`Tap a clip in the strip to edit it — the panel below shows that slot's length, effects, filter, sounds and test media. Drag the grips on the strip to trim, up to the ${MAX_TOTAL_SEC}s total.`}
             >
               {hasTestMedia ? (
                 <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-secondary/40 px-3 py-2">
@@ -2409,6 +2604,105 @@ const TemplateBuilder = () => {
                     <Trash2 className="mr-1.5 h-3.5 w-3.5" />
                     Clear test media
                   </Button>
+                </div>
+              ) : null}
+              {/* AUTO-DIRECT — the system assembles, the user re-rolls:
+                  one tap per category, one undo step each, music never
+                  touched. Shown once there is media to direct. */}
+              {hasTestMedia ? (
+                <div className="space-y-2 rounded-lg border border-primary/40 bg-secondary/40 p-2">
+                  <div className="flex flex-wrap items-center gap-2 px-1">
+                    <span className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+                      <Sparkles className="h-3.5 w-3.5 text-primary" />
+                      Auto-direct
+                      <span className="hidden font-normal sm:inline">
+                        — the system assembles, you re-roll. Music stays
+                        yours.
+                      </span>
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[11px] text-muted-foreground">
+                        Pacing
+                      </span>
+                      <Select
+                        value={pacingKind}
+                        onValueChange={(v) =>
+                          setPacingKind(v as Pacing["kind"])
+                        }
+                      >
+                        <SelectTrigger className="h-8 w-[190px] text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="random">Random</SelectItem>
+                          <SelectItem value="uniform">
+                            Fixed · {UNIFORM_SEC}s each
+                          </SelectItem>
+                          <SelectItem value="ramp">
+                            Stagger · {RAMP_START_SEC}s → {RAMP_END_SEC}s
+                          </SelectItem>
+                          <SelectItem value="beats">
+                            Beat sync · your song
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+                    <Button
+                      size="sm"
+                      className="h-8 justify-start text-xs sm:justify-center"
+                      disabled={directBusy}
+                      onClick={() => runDirector("direct")}
+                    >
+                      {directBusy ? (
+                        <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                      ) : (
+                        <Sparkles className="mr-1 h-3 w-3" />
+                      )}
+                      Re-direct
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-8 justify-start text-xs sm:justify-center"
+                      disabled={directBusy || filledCount < 2}
+                      onClick={() => runDirector("order")}
+                    >
+                      <Shuffle className="mr-1 h-3 w-3" />
+                      Shuffle order
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-8 justify-start text-xs sm:justify-center"
+                      disabled={directBusy}
+                      onClick={() => runDirector("look")}
+                    >
+                      <Palette className="mr-1 h-3 w-3" />
+                      Shuffle look
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-8 justify-start text-xs sm:justify-center"
+                      disabled={directBusy}
+                      onClick={() => runDirector("motion")}
+                    >
+                      <Wand2 className="mr-1 h-3 w-3" />
+                      Shuffle motion
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-8 justify-start text-xs sm:justify-center"
+                      disabled={directBusy || filledCount < 2}
+                      onClick={() => runDirector("transitions")}
+                    >
+                      <ArrowRightLeft className="mr-1 h-3 w-3" />
+                      Shuffle cuts
+                    </Button>
+                  </div>
                 </div>
               ) : null}
               {/* the timeline strip — chain drawn to scale, grips trim
@@ -2487,7 +2781,7 @@ const TemplateBuilder = () => {
 
                       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                         <Field label="Length">
-                          {/* seconds stepper: 1s up to what the 60s total
+                          {/* seconds stepper: 1s up to what the total
                               still has room for — every number computed */}
                           <div className="flex h-9 items-center justify-between rounded-md border border-input px-1">
                             <Button

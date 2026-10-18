@@ -7,7 +7,7 @@
  * ffmpeg core: a numbered JPEG sequence (+ the offline-rendered audio as WAV)
  * → MP4 H.264/AAC. Because software H.264 in wasm is slow and memory-hungry,
  * the fallback renders at a bounded 720×1280 @ 24fps so it always finishes.
- * The app already caps the total at 60s, which bounds the frame count too.
+ * The app already caps the total at MAX_TOTAL_SEC (300s), which bounds the frame count too.
  */
 
 import { fetchFile } from "@ffmpeg/util";

@@ -17,6 +17,7 @@ import {
   MIN_SLOT_SEC,
   NO_MUSIC_TRACK,
   isToneTrack,
+  presetKey,
   toneTrackId,
 } from "../src/core/model/types";
 import { TONES, TONE_GROUPS, getTone, tonePassSeconds } from "../src/core/audio/tones";
@@ -44,6 +45,25 @@ import { encodePcm16Wav } from "../src/exporter/wav";
 import { existsSync, readFileSync } from "node:fs";
 import { RAW_TEMPLATES } from "../src/templates/data";
 import { metrics } from "../src/templates/registry";
+import {
+  PHOTO_SEC_MAX,
+  PHOTO_SEC_MIN,
+  RAMP_END_SEC,
+  RAMP_START_SEC,
+  UNIFORM_SEC,
+  VIDEO_SEC_MAX,
+  VIDEO_SEC_MIN,
+  directAll,
+  directDurations,
+  directLook,
+  directMotion,
+  directSounds,
+  directTexts,
+  directTransitions,
+  shuffledIndices,
+  type MediaInfo,
+} from "../src/lib/direct";
+import { detectBeat } from "../src/lib/beat";
 
 let pass = 0;
 let fail = 0;
@@ -267,7 +287,7 @@ check("tone synthesis is deterministic (preview ≡ export)",
 /* --- the unlocked model constants --- */
 check("MIN_SLOT_SEC = 1s", MIN_SLOT_SEC === 1);
 check("DEFAULT_SLOT_SEC = 10s", DEFAULT_SLOT_SEC === 10);
-check("MAX_TOTAL_SEC = 60s", MAX_TOTAL_SEC === 60);
+check("MAX_TOTAL_SEC = 300s (5 min)", MAX_TOTAL_SEC === 300);
 
 /* --- music entry: soundtrack only (track + volume, no grid) --- */
 const musicOf = (t: Template) =>
@@ -332,21 +352,21 @@ const strayMeta = validateTemplate(
 check("local metadata on a silent track is blocked (V7)",
   strayMeta.template === undefined && strayMeta.issues.some((i) => i.rule === "V7"));
 
-/* --- V12: the 60s total cap (mini_punch has 3 slots) --- */
+/* --- V12: the 300s total cap (mini_punch has 3 slots, 100s each) --- */
 const atCap: Template = {
   ...mpT,
   music: { track: NO_MUSIC_TRACK },
-  tracks: { ...mpT.tracks, media: mpT.tracks.media.map((s) => ({ ...s, dur: 20 })) },
+  tracks: { ...mpT.tracks, media: mpT.tracks.media.map((s) => ({ ...s, dur: 100 })) },
   connections: [],
 };
-check("exactly 60s passes", validateTemplate(atCap, PRESET_MAP).issues.length === 0,
+check("exactly 300s (5 min) passes", validateTemplate(atCap, PRESET_MAP).issues.length === 0,
   validateTemplate(atCap, PRESET_MAP).issues.map((i) => `${i.rule}:${i.message}`).join("; "));
 const overCap: Template = {
   ...atCap,
-  tracks: { ...atCap.tracks, media: atCap.tracks.media.map((s, i) => (i === 0 ? { ...s, dur: 20.5 } : s)) },
+  tracks: { ...atCap.tracks, media: atCap.tracks.media.map((s, i) => (i === 0 ? { ...s, dur: 100.5 } : s)) },
 };
 const v12 = validateTemplate(overCap, PRESET_MAP);
-check("60.5s is blocked (V12)",
+check("300.5s is blocked (V12)",
   v12.template === undefined && v12.issues.some((i) => i.rule === "V12"),
   v12.issues.map((i) => i.rule).join(","));
 const v2dur = validateTemplate(
@@ -1266,17 +1286,17 @@ check("valid typography passes validation clean", vOkTy.issues.length === 0,
 /* ---------- 18. Media workbench length in seconds (D49) ---------- */
 console.log("\n[18] Media workbench length (D49)");
 
-/* the workbench takes the clip's own duration, capped by the 60s budget */
+/* the workbench takes the clip's own duration, capped by the 300s budget */
 const capOf = (clip: number, others: number): number =>
   Math.max(1, Math.min(clip, MAX_TOTAL_SEC - others));
 check("clip shorter than the room fills the slot as-is",
   capOf(7.5, 30) === 7.5, String(capOf(7.5, 30)));
-check("clip capped by the remaining 60s budget",
-  capOf(40.3, 30) === 30, String(capOf(40.3, 30)));
+check("clip capped by the remaining 300s budget",
+  capOf(40.3, 270) === 30, String(capOf(40.3, 270)));
 check("the cap never returns a slot below 1s",
-  capOf(0.4, 59.5) === 1, String(capOf(0.4, 59.5)));
+  capOf(0.4, 299.5) === 1, String(capOf(0.4, 299.5)));
 check("a full-budget slot still yields the 1s floor",
-  capOf(50, 60) === 1, String(capOf(50, 60)));
+  capOf(50, 300) === 1, String(capOf(50, 300)));
 
 /* ---------- 19. Timeline strip + cut-view math (Steps 2–3) ---------- */
 console.log("\n[19] Timeline strip + cut-view math (Steps 2–3)");
@@ -1310,7 +1330,7 @@ check("end grip grows the chain to the dragged length",
   JSON.stringify(endGrow.durs) === JSON.stringify([10, 20]) && near(endGrow.pos, 30),
   JSON.stringify(endGrow.durs));
 const endCap = trimAtBoundary([10, 10], 2, 99);
-check("end grip stops at the 60s cap (V12 unreachable from the strip)",
+check("end grip stops at the total cap (V12 unreachable from the strip)",
   endCap.durs.reduce((a, b) => a + b, 0) <= MAX_TOTAL_SEC + 1e-9,
   String(endCap.durs.reduce((a, b) => a + b, 0)));
 const endMin = trimAtBoundary([10, 10], 2, 3);
@@ -1477,6 +1497,258 @@ const soloText = resolve(soloTextTpl, content, PRESET_MAP).entries.find((e) => e
 check("text lasts only its own window (2s), not a slot",
   !!soloText && near(soloText.t, 0) && near(soloText.dur, 2),
   soloText ? `t=${soloText.t} dur=${soloText.dur}` : "missing");
+
+/* ---------- 23. Auto-direct engine (the director) ---------- */
+console.log("\n[23] Auto-direct engine");
+
+/* plain slot shape — the same fields SlotDraft carries */
+type DirSlot = {
+  dur: number;
+  effect: string;
+  vanim: string;
+  filterSel: string;
+  filterAmount: number;
+  transitionIn: string;
+  soundCut: string;
+  soundEffect: string;
+  soundTransition: string;
+};
+const mkDirSlot = (dur = 10): DirSlot => ({
+  dur,
+  effect: "none",
+  vanim: "none",
+  filterSel: "template",
+  filterAmount: 0.7,
+  transitionIn: presetKey("transition.dissolve", 1),
+  soundCut: "none",
+  soundEffect: "auto",
+  soundTransition: "auto",
+});
+const photo: MediaInfo = { isVideo: false, duration: 0 };
+const vid = (duration: number): MediaInfo => ({ isVideo: true, duration });
+
+/* durations: punchy photos on the 0.5s grid, video windows inside the clip */
+const phOut = directDurations(
+  Array.from({ length: 12 }, () => mkDirSlot()),
+  Array.from({ length: 12 }, () => photo),
+);
+check("photos land 1–3s on the 0.5s grid",
+  phOut.slots.every(
+    (s) =>
+      s.dur >= PHOTO_SEC_MIN &&
+      s.dur <= PHOTO_SEC_MAX &&
+      Math.abs(s.dur * 2 - Math.round(s.dur * 2)) < 1e-9,
+  ));
+check("photo trims start at 0", phOut.trims.every((t) => t === 0));
+const vOut = directDurations(
+  Array.from({ length: 12 }, () => mkDirSlot()),
+  Array.from({ length: 12 }, () => vid(30)),
+);
+check("video windows land 3–5s",
+  vOut.slots.every((s) => s.dur >= VIDEO_SEC_MIN && s.dur <= VIDEO_SEC_MAX));
+check("video trims stay inside the clip",
+  vOut.slots.every(
+    (s, i) =>
+      (vOut.trims[i] ?? 0) >= 0 && (vOut.trims[i] ?? 0) + s.dur <= 30 + 1e-9,
+  ));
+const shortClip = directDurations([mkDirSlot()], [vid(2)]);
+check("a clip shorter than its window plays in full",
+  shortClip.slots[0].dur === 2, String(shortClip.slots[0].dur));
+
+/* the budget + the scope rule — 200 slots must clamp (their 1s floor is
+   200s, so 300s is reachable); a 400-slot chain would be mathematically
+   unclampeable and is impossible in-app (add-slot needs 1s of room) */
+const clamped = directDurations(
+  Array.from({ length: 200 }, () => mkDirSlot(10)),
+  Array.from({ length: 200 }, () => photo),
+);
+check("a huge chain clamps into the 300s budget",
+  clamped.slots.reduce((a, s) => a + s.dur, 0) <= MAX_TOTAL_SEC + 1e-9);
+check("clamped slots keep the 1s floor",
+  clamped.slots.every((s) => s.dur >= MIN_SLOT_SEC));
+const scoped = directDurations(
+  [mkDirSlot(7), mkDirSlot(9)],
+  [photo, photo],
+  { only: [1] },
+);
+check("a scoped batch never touches other slots",
+  scoped.slots[0].dur === 7 &&
+    scoped.slots[1].dur >= PHOTO_SEC_MIN &&
+    scoped.slots[1].dur <= PHOTO_SEC_MAX);
+
+/* transitions: a real preset on every cut, never one identical cut */
+const seams = directTransitions(Array.from({ length: 6 }, () => mkDirSlot()));
+const seamKeys = new Set(TRANSITIONS.map((p) => presetKey(p.id, p.version)));
+check("every cut gets a real transition preset",
+  seams.every((s) => seamKeys.has(s.transitionIn)));
+check("a full chain never lands on one identical cut",
+  new Set(seams.slice(1).map((s) => s.transitionIn)).size > 1);
+
+/* sounds: random, but from the right catalog category */
+const sfxById = new Map(SFX_LIBRARY.map((d) => [d.id, d]));
+const fxKey = presetKey(MOTIONS[0].id, MOTIONS[0].version);
+const sndOut = directSounds([
+  { ...mkDirSlot(), effect: "none" },
+  { ...mkDirSlot(), effect: fxKey },
+]);
+check("cut sounds come from the Cuts category",
+  sndOut.every((s) => sfxById.get(s.soundCut)?.category === "cuts"));
+check("transition sounds come from the Transitions category",
+  sndOut.every((s) => sfxById.get(s.soundTransition)?.category === "transitions"));
+check("a slot with no effect keeps its effect sound on auto",
+  sndOut[0].soundEffect === "auto");
+check(
+  "a slot with an effect gets a Cinematic sound",
+  sndOut[1].soundEffect !== "auto" &&
+    sfxById.get(sndOut[1].soundEffect)?.category === "cinematic",
+);
+
+/* look + motion + texts stay inside the catalogs */
+const filterIds = new Set(FILTER_PRESETS.map((p) => p.id));
+const lookOut = directLook(Array.from({ length: 8 }, () => mkDirSlot()));
+check("every look pick is legal (preset / template / off)",
+  lookOut.every(
+    (s) =>
+      s.filterSel === "template" ||
+      s.filterSel === "off" ||
+      filterIds.has(s.filterSel),
+  ));
+check(
+  "explicit filters sit in the 0.6–1 intensity band",
+  lookOut
+    .filter((s) => filterIds.has(s.filterSel))
+    .every((s) => s.filterAmount >= 0.6 - 1e-9 && s.filterAmount <= 1 + 1e-9),
+);
+const motionOut = directMotion(Array.from({ length: 8 }, () => mkDirSlot()));
+const effectKeys = new Set(
+  [...MOTIONS, ...EFFECTS].map((p) => presetKey(p.id, p.version)),
+);
+const vanimKeys = new Set(VANIM_PRESETS.map((p) => presetKey(p.id, p.version)));
+check("motion picks are none or real presets",
+  motionOut.every((s) => s.effect === "none" || effectKeys.has(s.effect)) &&
+    motionOut.every((s) => s.vanim === "none" || vanimKeys.has(s.vanim)));
+const entranceKeys = new Set(
+  TEXT_PRESETS.filter((p) => p.tags[0] !== "exit").map((p) =>
+    presetKey(p.id, p.version),
+  ),
+);
+const exitKeys = new Set(TEXT_EXITS.map((p) => presetKey(p.id, p.version)));
+const textOut = directTexts([
+  { anim: "", outAnim: "" },
+  { anim: "", outAnim: "" },
+]);
+check("text anims are legal: an entrance always, an exit or hold",
+  textOut.every(
+    (t) =>
+      entranceKeys.has(t.anim) &&
+      (t.outAnim === "" || exitKeys.has(t.outAnim)),
+  ));
+
+/* order shuffle + the full pass */
+const perm = shuffledIndices(7);
+check("shuffle order is a real permutation",
+  perm.length === 7 && [...perm].sort((a, b) => a - b).every((v, i) => v === i));
+const allOut = directAll(
+  Array.from({ length: 4 }, () => mkDirSlot()),
+  [photo, vid(30), photo, vid(2)],
+);
+check("the full pass keeps the budget and the 1s floor",
+  allOut.slots.reduce((a, s) => a + s.dur, 0) <= MAX_TOTAL_SEC + 1e-9 &&
+    allOut.slots.every((s) => s.dur >= MIN_SLOT_SEC));
+
+/* ---------- 24. Timing — pacing modes + local beat detection ---------- */
+console.log("\n[24] Timing — pacing modes + beat detection");
+
+/* fixed duration: every cut the same, never longer than a clip */
+const uni = directDurations(
+  Array.from({ length: 8 }, () => mkDirSlot()),
+  Array.from({ length: 8 }, () => photo),
+  { pacing: { kind: "uniform" } },
+);
+check("fixed pacing makes every photo cut equal",
+  uni.slots.every((s) => s.dur === UNIFORM_SEC));
+const uniVid = directDurations([mkDirSlot()], [vid(1.4)], {
+  pacing: { kind: "uniform" },
+});
+check("fixed pacing never stretches a clip",
+  uniVid.slots[0].dur === 1.4, String(uniVid.slots[0].dur));
+
+/* stagger: cuts tighten from the first length to the last */
+const ramp = directDurations(
+  Array.from({ length: 6 }, () => mkDirSlot()),
+  Array.from({ length: 6 }, () => photo),
+  { pacing: { kind: "ramp" } },
+);
+check("stagger runs from the first length to the last",
+  ramp.slots[0].dur === RAMP_START_SEC &&
+    ramp.slots[5].dur === RAMP_END_SEC,
+  `${ramp.slots[0].dur}..${ramp.slots[5].dur}`);
+check("stagger cuts only tighten",
+  ramp.slots.every((s, i) => i === 0 || s.dur <= ramp.slots[i - 1].dur + 1e-9));
+
+/* beat sync: whole beats from beat zero */
+const bSec = 60 / 120;
+const beatsOut = directDurations(
+  Array.from({ length: 10 }, () => mkDirSlot()),
+  Array.from({ length: 10 }, () => photo),
+  { pacing: { kind: "beats", bpm: 120, phase: 0, songStart: 0 } },
+);
+{
+  let cum = 0;
+  let onGrid = true;
+  for (const s of beatsOut.slots) {
+    cum += s.dur;
+    if (Math.abs(cum / bSec - Math.round(cum / bSec)) > 1e-6) onGrid = false;
+  }
+  check("beat sync lands every cut on the beat (120 BPM)", onGrid);
+}
+check("beat sync keeps the 1s floor",
+  beatsOut.slots.every((s) => s.dur >= MIN_SLOT_SEC - 1e-9));
+const beatsFast = directDurations(
+  Array.from({ length: 6 }, () => mkDirSlot()),
+  Array.from({ length: 6 }, () => photo),
+  { pacing: { kind: "beats", bpm: 180, phase: 0, songStart: 0 } },
+);
+check("a 180 BPM song never cuts faster than 1s",
+  beatsFast.slots.every((s) => s.dur >= 1 - 1e-9),
+  beatsFast.slots.map((s) => s.dur).join(","));
+/* a song window starting mid-beat: slot 0 absorbs the offset so every
+   later cut still lands exactly on a beat */
+const beatsOff = directDurations(
+  Array.from({ length: 8 }, () => mkDirSlot()),
+  Array.from({ length: 8 }, () => photo),
+  { pacing: { kind: "beats", bpm: 120, phase: 0.25, songStart: 1 } },
+);
+{
+  let start = beatsOff.slots[0].dur; // start of slot 1
+  let aligned = true;
+  for (let i = 1; i < beatsOff.slots.length; i++) {
+    if (Math.abs((start - 0.25) / bSec - Math.round((start - 0.25) / bSec)) > 1e-6)
+      aligned = false;
+    start += beatsOff.slots[i].dur;
+  }
+  check("slot 1+ starts on beats even with a mid-song window", aligned);
+}
+
+/* detection: a synthetic 120 BPM click track, silence, a short buffer */
+const SR = 44100;
+const click = new Float32Array(SR * 12);
+for (let t = 0; t < 12; t += 0.5) {
+  const base = Math.round(t * SR);
+  for (let i = 0; i < Math.round(0.03 * SR) && base + i < click.length; i++)
+    click[base + i] = 0.9 * Math.sin((2 * Math.PI * 1000 * i) / SR);
+}
+const beat = detectBeat(click, SR);
+check("detects a synthetic 120 BPM click track",
+  !!beat && Math.abs(beat.bpm - 120) <= 2,
+  beat ? `bpm=${beat.bpm.toFixed(2)}` : "null");
+check("beat phase lands on the clicks (±50ms)",
+  !!beat && beat.phase >= 0 && beat.phase <= 0.05,
+  beat ? `phase=${beat.phase.toFixed(3)}` : "null");
+check("silence has no beat (honest null)",
+  detectBeat(new Float32Array(SR), SR) === null);
+check("a too-short buffer gives up honestly",
+  detectBeat(new Float32Array(Math.round(SR * 0.4)), SR) === null);
 
 /* ---------- summary ---------- */
 console.log(`\n${"=".repeat(46)}\n  ${pass} passed, ${fail} failed\n${"=".repeat(46)}`);

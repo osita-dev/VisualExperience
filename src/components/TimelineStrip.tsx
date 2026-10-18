@@ -2,7 +2,7 @@
  * TimelineStrip — the CapCut-style chain timeline for the builder (Step 2).
  * Every slot is drawn to scale in plain seconds, lime grips sit on each
  * cut (drag = ripple-trim between the two neighbouring slots) and on the
- * end of the chain (drag = grow/shrink the total inside the 60s budget).
+ * end of the chain (drag = grow/shrink the total inside the budget).
  * The ruler scrubs the preview, the playhead follows the player every
  * frame via direct DOM writes, and every number derives from the draft.
  */
@@ -34,7 +34,7 @@ interface Props {
 }
 
 /** ruler tick spacing: the first step that keeps the labels readable */
-const TICK_STEPS = [1, 2, 5, 10, 15, 30, 60];
+const TICK_STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300];
 const r10 = (v: number): number => Math.round(v * 10) / 10;
 
 /* memoized: the builder feeds value-stable props, so edits that don't
