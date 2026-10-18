@@ -8,6 +8,12 @@
 
 import type { Schedule, ScheduleEntry } from "@/core/model/types";
 import { STICKER_ASSETS, type StickerAsset } from "@/core/media/stickers";
+import {
+  LAYOUT_RADIUS,
+  layoutRects,
+  paneCount,
+  paneKey,
+} from "@/core/media/layouts";
 import { applyEase, lerp, mulberry32 } from "@/core/resolve/easing";
 
 const TAU = Math.PI * 2;
@@ -32,6 +38,10 @@ interface MediaPlanItem {
   end: number;
   trimStart: number;
   crop: "fill" | "fit";
+  /** Composition (D56): layout id — "single" = one full-frame pane */
+  layout: string;
+  /** per-pane trim starts (index = pane); pane 0 also lives in trimStart */
+  paneTrims: number[];
   showStart: number;
   showEnd: number;
 }
@@ -47,6 +57,7 @@ export function buildMediaPlan(s: Schedule): MediaPlanItem[] {
     const show = s.entries.find(
       (e) => e.kind === "media" && e.target === slot.id && e.do === "show",
     );
+    const rawPanes = show?.params.panes;
     plan.push({
       slotId: slot.id,
       index: slot.index,
@@ -54,6 +65,10 @@ export function buildMediaPlan(s: Schedule): MediaPlanItem[] {
       end: slot.end,
       trimStart: Number(show?.params.trimStart ?? 0),
       crop: (show?.params.crop as "fill" | "fit") ?? "fill",
+      layout: String(show?.params.layout ?? "single"),
+      paneTrims: Array.isArray(rawPanes)
+        ? rawPanes.map((n) => Number(n ?? 0))
+        : [],
       showStart: show?.t ?? slot.start,
       showEnd: show ? show.t + show.dur : slot.end,
     });
@@ -100,49 +115,53 @@ export function syncMedia(
     seeks.push({ el: v, target });
   };
   for (const item of plan) {
-    const b = bindings[item.slotId];
-    const v = b ? toVideo(b) : null;
-    if (!v) continue;
-    const visible = t >= item.showStart && t < item.showEnd;
-    /* time-map (D44): freeze / slow-mo / speed-ramp remap clip time */
-    const tm = timeMapOf(s.entries, item.slotId, t);
-    let el = Math.min(t - item.start, item.end - item.start);
-    if (tm) el = applyTimeMap(tm, Math.max(0, el), item.end - item.start);
-    const target =
-      t < item.start ? item.trimStart : item.trimStart + Math.max(0, el);
+    /* Composition (D56): every pane's clip is transported on its own —
+       same window, same time-map, its own trim (pane 0 = the slot's) */
+    for (let pane = 0; pane < paneCount(item.layout); pane++) {
+      const trim =
+        pane === 0 ? item.trimStart : (item.paneTrims[pane] ?? item.trimStart);
+      const b = bindings[paneKey(item.slotId, pane)];
+      const v = b ? toVideo(b) : null;
+      if (!v) continue;
+      const visible = t >= item.showStart && t < item.showEnd;
+      /* time-map (D44): freeze / slow-mo / speed-ramp remap clip time */
+      const tm = timeMapOf(s.entries, item.slotId, t);
+      let el = Math.min(t - item.start, item.end - item.start);
+      if (tm) el = applyTimeMap(tm, Math.max(0, el), item.end - item.start);
+      const target = t < item.start ? trim : trim + Math.max(0, el);
 
-    if (tm && tm.params.tm === "freeze") {
-      /* a frozen clip is parked, not fought with drift correction */
-      v.pause();
-      if (Math.abs(v.currentTime - target) > 0.02) seekTo(v, target);
-      continue;
-    }
-    if (!playing) {
-      v.pause();
-      if (seek && Math.abs(v.currentTime - target) > 0.02) seekTo(v, target);
-      continue;
-    }
-    if (!visible) {
-      v.pause();
-      continue;
-    }
-    if (t < item.start) {
-      // pre-roll: hold the first frame of the trim window
-      v.pause();
-      if (Math.abs(v.currentTime - item.trimStart) > 0.12)
-        seekTo(v, item.trimStart);
-      continue;
-    }
-    if (t <= item.end) {
-      if (v.paused) {
-        seekTo(v, target);
-        void v.play().catch(() => undefined);
-      } else if (Math.abs(v.currentTime - target) > 0.35) {
-        seekTo(v, target); // drift correction (tab throttle etc.)
+      if (tm && tm.params.tm === "freeze") {
+        /* a frozen clip is parked, not fought with drift correction */
+        v.pause();
+        if (Math.abs(v.currentTime - target) > 0.02) seekTo(v, target);
+        continue;
       }
-    } else if (v.paused && !v.ended) {
-      // post-roll: keep playing into spare material; freezes at clip end
-      void v.play().catch(() => undefined);
+      if (!playing) {
+        v.pause();
+        if (seek && Math.abs(v.currentTime - target) > 0.02) seekTo(v, target);
+        continue;
+      }
+      if (!visible) {
+        v.pause();
+        continue;
+      }
+      if (t < item.start) {
+        // pre-roll: hold the first frame of the trim window
+        v.pause();
+        if (Math.abs(v.currentTime - trim) > 0.12) seekTo(v, trim);
+        continue;
+      }
+      if (t <= item.end) {
+        if (v.paused) {
+          seekTo(v, target);
+          void v.play().catch(() => undefined);
+        } else if (Math.abs(v.currentTime - target) > 0.35) {
+          seekTo(v, target); // drift correction (tab throttle etc.)
+        }
+      } else if (v.paused && !v.ended) {
+        // post-roll: keep playing into spare material; freezes at clip end
+        void v.play().catch(() => undefined);
+      }
     }
   }
   return seeks;
@@ -761,18 +780,24 @@ export class FrameRenderer {
     lc.save();
     if (motion) this.applyMotion(lc, motion, t, VW, VH);
 
-    const b = bindings[item.slotId];
-    if (b) {
-      /* light filter (D45) — baked into the media draw; save/restore
-         clears it and placeholders are never filtered */
-      const mf = mediaFilterOf(s.entries, item.slotId);
-      lc.filter = mf ? filterCss(mf) : "none";
-    }
-    if (b && this.drawSource(lc, b, item, VW, VH)) {
-      /* drawn */
+    /* Composition (D56): split/collage panes draw first; a slot with no
+       pane media at all falls back to the designed full-frame path */
+    if (paneCount(item.layout) > 1 && this.drawPanes(lc, s, item, bindings, VW, VH)) {
+      /* panes drawn — each cover-cropped in its own rounded rect */
     } else {
-      lc.filter = "none";
-      this.drawPlaceholder(lc, s.meta, item, VW, VH);
+      const b = bindings[item.slotId];
+      if (b) {
+        /* light filter (D45) — baked into the media draw; save/restore
+           clears it and placeholders are never filtered */
+        const mf = mediaFilterOf(s.entries, item.slotId);
+        lc.filter = mf ? filterCss(mf) : "none";
+      }
+      if (b && this.drawSource(lc, b, item, VW, VH)) {
+        /* drawn */
+      } else {
+        lc.filter = "none";
+        this.drawPlaceholder(lc, s.meta, item, VW, VH);
+      }
     }
     lc.restore();
 
@@ -1348,12 +1373,71 @@ export class FrameRenderer {
     main.restore();
   }
 
+  /**
+   * Composition (D56): the slot's media panes — split screen / collage.
+   * Each pane's media is cover-cropped inside its own rounded rect (a
+   * small gap separates the panes); filters and effects still act on the
+   * whole composite — they belong to the slot, not the panes. An unfilled
+   * pane is an honest empty frame, never invented media. Returns false
+   * when NO pane has drawable media, so the slot falls back to its
+   * designed placeholder.
+   */
+  private drawPanes(
+    lc: Ctx2D,
+    s: Schedule,
+    item: MediaPlanItem,
+    bindings: Bindings,
+    VW: number,
+    VH: number,
+  ): boolean {
+    const rects = layoutRects(item.layout);
+    const mf = mediaFilterOf(s.entries, item.slotId);
+    const rad = LAYOUT_RADIUS * VW;
+    let any = false;
+    for (let p = 0; p < rects.length; p++) {
+      const r = rects[p];
+      const x = r.x * VW;
+      const y = r.y * VH;
+      const w = r.w * VW;
+      const h = r.h * VH;
+      const b = bindings[paneKey(item.slotId, p)];
+      lc.save();
+      lc.beginPath();
+      if (typeof lc.roundRect === "function") lc.roundRect(x, y, w, h, rad);
+      else lc.rect(x, y, w, h);
+      lc.clip();
+      if (b) {
+        lc.filter = mf ? filterCss(mf) : "none";
+        if (this.drawSourceIn(lc, b, item, x, y, w, h)) any = true;
+      } else {
+        lc.fillStyle = "rgba(0,0,0,0.28)";
+        lc.fillRect(x, y, w, h);
+      }
+      lc.restore();
+    }
+    return any;
+  }
+
+  /** Draw a binding's current frame filling the whole frame (full bleed). */
   private drawSource(
     lc: Ctx2D,
     b: MediaBinding,
     item: MediaPlanItem,
     VW: number,
     VH: number,
+  ): boolean {
+    return this.drawSourceIn(lc, b, item, 0, 0, VW, VH);
+  }
+
+  /** Like drawSource, but into an arbitrary rect (pane drawing). */
+  private drawSourceIn(
+    lc: Ctx2D,
+    b: MediaBinding,
+    item: MediaPlanItem,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
   ): boolean {
     let sw = 0;
     let sh = 0;
@@ -1369,10 +1453,10 @@ export class FrameRenderer {
       sh = v.videoHeight;
     }
     const cover = item.crop !== "fit";
-    const k = cover ? Math.max(VW / sw, VH / sh) : Math.min(VW / sw, VH / sh);
+    const k = cover ? Math.max(w / sw, h / sh) : Math.min(w / sw, h / sh);
     const dw = sw * k;
     const dh = sh * k;
-    lc.drawImage(b.el, (VW - dw) / 2, (VH - dh) / 2, dw, dh);
+    lc.drawImage(b.el, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
     return true;
   }
 

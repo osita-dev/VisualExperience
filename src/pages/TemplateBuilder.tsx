@@ -75,6 +75,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { resolve } from "@/core/resolve/resolve";
 import { validateTemplate } from "@/core/validate/validate";
+import { LAYOUTS, paneCount, paneKey } from "@/core/media/layouts";
 import type {
   Connection,
   ImageSlot,
@@ -127,6 +128,7 @@ import {
 } from "@/presets/data";
 import { TEXT_EXITS, TEXT_FAMILIES } from "@/presets/textCatalog";
 import { fmtSec } from "@/lib/format";
+import { cn } from "@/lib/utils";
 import { probeFile } from "@/lib/mediaUtils";
 import type { ProbedMedia } from "@/lib/mediaUtils";
 import {
@@ -138,6 +140,8 @@ import {
   directLook,
   directMotion,
   directTexts,
+  directTextPlacement,
+  type TextShape,
   directTransitions,
   shuffledIndices,
   type MediaInfo,
@@ -188,6 +192,8 @@ interface SlotDraft {
   uid: string;
   /** slot length in seconds (0.5 grid, 1..MAX_TOTAL_SEC) */
   dur: number;
+  /** "single" | split/collage layout id (D56) */
+  layout: string;
   /** preset key or "none" */
   effect: string;
   /** preset key or "none" — video animation (D44): how the media behaves */
@@ -656,6 +662,19 @@ function textHitSize(t: TextDraft): number {
   return Math.min(0.98, Math.max(width, t.sizeRel * 1.8, 0.08));
 }
 
+/** A text's placement shape: half-width (of canvas WIDTH) and half-height
+ *  (of canvas HEIGHT), so the director can test overlap honestly. */
+function textShape(t: TextDraft): TextShape {
+  return {
+    x: t.x,
+    y: t.y,
+    w: textHitSize(t) / 2,
+    h: t.sizeRel * 0.9, // one line's half-height, generously padded
+    start: t.start,
+    dur: t.dur,
+  };
+}
+
 /**
  * Greedy lane packing for the text strip — texts that overlap in time stack
  * into their own rows, so every one stays visible and tappable.
@@ -698,6 +717,8 @@ function draftToTemplate(d: Draft, id: string): Template {
       accepts: ["photo", "video"],
       dur: s.dur,
       crop: "fill",
+      /* Composition (D56): only a worn layout lands in the template */
+      ...(s.layout !== "single" ? { layout: s.layout } : {}),
       ...(ref || vref
         ? {
             blockPresets: [
@@ -826,6 +847,7 @@ function draftFromTemplate(t: Template): Draft {
     return {
       uid: newUid(),
       dur: s.dur,
+      layout: s.layout ?? "single",
       effect: bp ? presetKey(bp.preset, bp.version) : "none",
       vanim: vbp ? presetKey(vbp.preset, vbp.version) : "none",
       filterSel: s.filter === null ? "off" : s.filter?.preset ?? "template",
@@ -932,6 +954,7 @@ function defaultDraft(): Draft {
   const s1: SlotDraft = {
     uid: newUid(),
     dur: DEFAULT_SLOT_SEC,
+    layout: "single",
     effect: "none",
     vanim: "none",
     filterSel: "template",
@@ -944,6 +967,7 @@ function defaultDraft(): Draft {
   const s2: SlotDraft = {
     uid: newUid(),
     dur: DEFAULT_SLOT_SEC,
+    layout: "single",
     effect: presetKey("motion.push_in", 1),
     vanim: "none",
     filterSel: "template",
@@ -1199,6 +1223,8 @@ const TemplateBuilder = () => {
   /* -------- imported music (D40) -------- */
   const [importing, setImporting] = useState(false);
   const localFileRef = useRef<HTMLInputElement | null>(null);
+  /* the multi-file picker behind "Fill panes" (D56) */
+  const paneFillRef = useRef<HTMLInputElement>(null);
   /* stickers & logos (D46) */
   const [stickerOpen, setStickerOpen] = useState(false);
   const [savedLogos, setSavedLogos] = useState<LogoRecord[]>([]);
@@ -1548,6 +1574,7 @@ const TemplateBuilder = () => {
           {
             uid: newUid(),
             dur: DEFAULT_SLOT_SEC,
+            layout: "single",
             effect: "none",
             vanim: "none",
             filterSel: "template",
@@ -1647,6 +1674,7 @@ const TemplateBuilder = () => {
             nextSlots.push({
               uid: newUid(),
               dur,
+              layout: "single",
               effect: "none",
               vanim: "none",
               filterSel: "template",
@@ -1782,8 +1810,45 @@ const TemplateBuilder = () => {
     (_, i) => testMedia[`s${i + 1}`] !== undefined,
   ).length;
 
+  /** Scatter every text across the good spots (D57) and, when short,
+   *  add up to the 3–4 target with honest placeholder copy the creator
+   *  replaces. One undo step; positions are stored, so preview ≡ export. */
+  const scatterTexts = (): TextDraft[] => {
+    const shaped = draft.texts.map((t) => ({ ...t, ...textShape(t) }));
+    const { texts } = directTextPlacement(
+      shaped,
+      totalSecOf(draft.slots),
+      /* added texts get the same authored defaults a hand-added text
+       * would get — the placeholder copy is what we hand the factory */
+      (seed): TextDraft => ({
+        uid: newUid(),
+        start: seed.start,
+        dur: seed.dur,
+        anim: ANIM_OPTIONS[0].key,
+        outAnim: "",
+        look: "center",
+        typography: "",
+        font: "",
+        weight: LOOKS.center.weight,
+        sizeRel: LOOKS.center.sizeRel,
+        x: 0.5,
+        y: LOOKS.center.yRel,
+        value: seed.value,
+        sound: SOUND_OFF,
+      }),
+    );
+    return texts.map((t) => ({
+      ...t,
+      uid: t.uid ?? newUid(),
+      anim: t.anim || ANIM_OPTIONS[0].key,
+      x: t.x,
+      y: t.y,
+      value: t.value,
+    }));
+  };
+
   const runDirector = async (
-    kind: "direct" | "order" | "look" | "motion" | "transitions",
+    kind: "direct" | "order" | "look" | "motion" | "transitions" | "place",
   ) => {
     const slots = draft.slots;
     const mediaAt = (i: number): MediaInfo | undefined => {
@@ -1871,11 +1936,22 @@ const TemplateBuilder = () => {
       return;
     }
 
+    if (kind === "place") {
+      const texts = scatterTexts();
+      const total = totalSecOf(draft.slots);
+      setDraft((d) => ({
+        ...d,
+        texts: texts.map((t) => clampTextWin(t, total)),
+      }));
+      toast.success("Text placed across the frame.");
+      return;
+    }
+
     if (kind === "direct") {
       const directed = directAll(slots, slots.map((_, i) => mediaAt(i)), {
         pacing,
       });
-      const texts = directTexts(draft.texts);
+      const texts = scatterTexts();
       setDraft((d) => ({
         ...d,
         slots: directed.slots,
@@ -2132,8 +2208,12 @@ const TemplateBuilder = () => {
   }
 
   // the workbench derives a slot's length from the kept clip (D49) —
-  // its growth room is the same total cap the length stepper enforces
-  const pickerIdx = pickerFor ? Number(pickerFor.slice(1)) - 1 : -1;
+  // its growth room is the same total cap the length stepper enforces.
+  // A pane key is `s3#2`: the slot is the part before the `#` (D56).
+  const pickerPane = pickerFor?.includes("#")
+    ? Number(pickerFor.split("#")[1])
+    : 0;
+  const pickerIdx = pickerFor ? Number(pickerFor.split("#")[0].slice(1)) - 1 : -1;
   const pickerSlotDraft = draft.slots[pickerIdx];
   const pickerSec = pickerSlotDraft?.dur ?? DEFAULT_SLOT_SEC;
   const pickerMaxSec = Math.max(
@@ -2146,6 +2226,44 @@ const TemplateBuilder = () => {
     accepts: ["photo", "video"],
     dur: pickerSec,
     crop: "fill",
+    layout: pickerSlotDraft?.layout ?? "single",
+  };
+
+  /* Composition (D56): "Fill panes" — one multi-file pick fills this
+     slot's EMPTY panes in order (a split needs 2, a collage 3–4) */
+  const handleFillPanes = async (files: FileList | null) => {
+    const list = Array.from(files ?? []);
+    const slot = draft.slots[selIndex];
+    if (!list.length || !slot) return;
+    const base = `s${selIndex + 1}`;
+    const paneN = paneCount(slot.layout);
+    const empties: number[] = [];
+    for (let p = 0; p < paneN; p++)
+      if (!testMedia[paneKey(base, p)]) empties.push(p);
+    if (!empties.length) {
+      toast("Every pane already has media — use Change on a pane.");
+      return;
+    }
+    setBulkBusy(true);
+    let filled = 0;
+    try {
+      for (let k = 0; k < Math.min(list.length, empties.length); k++) {
+        try {
+          /* probes; a video the browser refuses is converted on-device */
+          const m = await ingestWithToast(list[k]);
+          const pKey = paneKey(base, empties[k]);
+          setTestMedia((prev) => ({ ...prev, [pKey]: m }));
+          setTestTrims((prev) => ({ ...prev, [pKey]: 0 }));
+          filled++;
+        } catch {
+          /* ingestWithToast already showed the honest error — keep going */
+        }
+      }
+    } finally {
+      setBulkBusy(false);
+    }
+    if (filled > 0)
+      toast.success(`Filled ${filled} pane${filled === 1 ? "" : "s"}.`);
   };
 
   return (
@@ -2745,7 +2863,7 @@ const TemplateBuilder = () => {
                       </Select>
                     </div>
                   </div>
-                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                     <Button
                       size="sm"
                       className="h-8 justify-start text-xs sm:justify-center"
@@ -2799,6 +2917,16 @@ const TemplateBuilder = () => {
                       <ArrowRightLeft className="mr-1 h-3 w-3" />
                       Shuffle cuts
                     </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-8 justify-start text-xs sm:justify-center"
+                      disabled={directBusy}
+                      onClick={() => runDirector("place")}
+                    >
+                      <Type className="mr-1 h-3 w-3" />
+                      Place text
+                    </Button>
                   </div>
                 </div>
               ) : null}
@@ -2822,6 +2950,8 @@ const TemplateBuilder = () => {
                   const slot = draft.slots[i];
                   if (!slot) return null;
                   const startSec = slotStartSec(draft.slots, i);
+                  /* Composition (D56): paneN > 1 → one row per pane below */
+                  const paneN = paneCount(slot.layout);
                   const test = testMedia[`s${i + 1}`];
                   /* the slot's cut, clamped to the clip (computed, shown honestly) */
                   const trimKey = `s${i + 1}`;
@@ -2915,6 +3045,33 @@ const TemplateBuilder = () => {
                               <Plus className="h-3.5 w-3.5" />
                             </Button>
                           </div>
+                        </Field>
+                        <Field label="Layout">
+                          {/* Composition (D56): one slot can show several
+                              media panes — split screen or collage */}
+                          <Select
+                            value={slot.layout}
+                            onValueChange={(v) => {
+                              patchSlot(slot.uid, { layout: v });
+                              /* say what just became possible (D56) */
+                              const n = paneCount(v);
+                              if (n > 1)
+                                toast(
+                                  `${n} panes — add media to each below (Fill panes picks several at once).`,
+                                );
+                            }}
+                          >
+                            <SelectTrigger className="h-9" aria-label="Slot layout">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {LAYOUTS.map((l) => (
+                                <SelectItem key={l.id} value={l.id}>
+                                  {l.label}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
                         </Field>
                         <Field label="Effect">
                           <Select
@@ -3067,68 +3224,174 @@ const TemplateBuilder = () => {
                         )}
                       </div>
 
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => setPickerFor(`s${i + 1}`)}
-                        >
+                      {paneN === 1 ? (
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setPickerFor(`s${i + 1}`)}
+                          >
+                            {test ? (
+                              <Film className="mr-1.5 h-3.5 w-3.5" />
+                            ) : (
+                              <ImagePlus className="mr-1.5 h-3.5 w-3.5" />
+                            )}
+                            {test ? "Change test media" : "Test media"}
+                          </Button>
                           {test ? (
-                            <Film className="mr-1.5 h-3.5 w-3.5" />
-                          ) : (
-                            <ImagePlus className="mr-1.5 h-3.5 w-3.5" />
-                          )}
-                          {test ? "Change test media" : "Test media"}
-                        </Button>
-                        {test ? (
-                          <>
-                            {test.thumb ? (
-                              <img
-                                src={test.thumb}
-                                alt=""
-                                className="h-8 w-[18px] rounded border border-border object-cover"
-                              />
-                            ) : null}
-                            {test.isVideo ? (
-                              <>
+                            <>
+                              {test.thumb ? (
+                                <img
+                                  src={test.thumb}
+                                  alt=""
+                                  className="h-8 w-[18px] rounded border border-border object-cover"
+                                />
+                              ) : null}
+                              {test.isVideo ? (
+                                <>
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => setCutFor(trimKey)}
+                                  >
+                                    <Scissors className="mr-1.5 h-3.5 w-3.5" />
+                                    Cut
+                                  </Button>
+                                  <span className="text-[11px] tabular-nums text-muted-foreground">
+                                    {testTrimMax <= 0.05
+                                      ? `Whole ${fmtSec(test.duration)} clip`
+                                      : `${fmtSec(testTrim)} → ${fmtSec(testTrim + slot.dur)} of ${fmtSec(test.duration)}`}
+                                  </span>
+                                </>
+                              ) : null}
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="text-destructive hover:text-destructive"
+                                onClick={() => {
+                                  setTestMedia((prev) => {
+                                    const next = { ...prev };
+                                    delete next[trimKey];
+                                    return next;
+                                  });
+                                  setTestTrims((prev) => {
+                                    const next = { ...prev };
+                                    delete next[trimKey];
+                                    return next;
+                                  });
+                                }}
+                              >
+                                <Trash2 className="mr-1 h-3.5 w-3.5" />
+                                Clear
+                              </Button>
+                            </>
+                          ) : null}
+                        </div>
+                      ) : (
+                        /* Composition (D56): every pane asks for its own
+                           media, right here — and one multi-file pick can
+                           fill the whole layout in order */
+                        <div className="space-y-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              disabled={bulkBusy}
+                              onClick={() => paneFillRef.current?.click()}
+                            >
+                              <ImagePlus className="mr-1.5 h-3.5 w-3.5" />
+                              Fill panes
+                            </Button>
+                            <span className="text-[11px] text-muted-foreground">
+                              pick several files at once — they land in order
+                            </span>
+                          </div>
+                          {Array.from({ length: paneN }, (_, p) => {
+                            const pKey = paneKey(`s${i + 1}`, p);
+                            const mTest = testMedia[pKey];
+                            const pTrimMax = mTest?.isVideo
+                              ? Math.max(0, mTest.duration - slot.dur)
+                              : 0;
+                            const pTrim = Math.min(testTrims[pKey] ?? 0, pTrimMax);
+                            return (
+                              <div
+                                key={p}
+                                className={cn(
+                                  "flex flex-wrap items-center gap-2 rounded-lg border px-2.5 py-2",
+                                  mTest
+                                    ? "border-border/70 bg-secondary/40"
+                                    : "border-dashed border-primary/50 bg-primary/5",
+                                )}
+                              >
+                                <span className="text-[11px] font-semibold text-foreground">
+                                  Pane {p + 1}
+                                </span>
+                                {mTest?.thumb ? (
+                                  <img
+                                    src={mTest.thumb}
+                                    alt=""
+                                    className="h-8 w-[18px] rounded border border-border object-cover"
+                                  />
+                                ) : null}
+                                {mTest?.isVideo ? (
+                                  <>
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      onClick={() => setCutFor(pKey)}
+                                    >
+                                      <Scissors className="mr-1.5 h-3.5 w-3.5" />
+                                      Cut
+                                    </Button>
+                                    <span className="text-[11px] tabular-nums text-muted-foreground">
+                                      {pTrimMax <= 0.05
+                                        ? `Whole ${fmtSec(mTest.duration)} clip`
+                                        : `${fmtSec(pTrim)} → ${fmtSec(pTrim + slot.dur)} of ${fmtSec(mTest.duration)}`}
+                                    </span>
+                                  </>
+                                ) : (
+                                  <span className="text-[11px] text-muted-foreground">
+                                    {p === 0
+                                      ? "sets the slot's length · its sound plays"
+                                      : "muted under the music"}
+                                  </span>
+                                )}
+                                <div className="flex-1" />
                                 <Button
                                   variant="outline"
                                   size="sm"
-                                  onClick={() => setCutFor(trimKey)}
+                                  onClick={() => setPickerFor(pKey)}
                                 >
-                                  <Scissors className="mr-1.5 h-3.5 w-3.5" />
-                                  Cut
+                                  <ImagePlus className="mr-1.5 h-3.5 w-3.5" />
+                                  {mTest ? "Change" : "Add"}
                                 </Button>
-                                <span className="text-[11px] tabular-nums text-muted-foreground">
-                                  {testTrimMax <= 0.05
-                                    ? `Whole ${fmtSec(test.duration)} clip`
-                                    : `${fmtSec(testTrim)} → ${fmtSec(testTrim + slot.dur)} of ${fmtSec(test.duration)}`}
-                                </span>
-                              </>
-                            ) : null}
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="text-destructive hover:text-destructive"
-                              onClick={() => {
-                                setTestMedia((prev) => {
-                                  const next = { ...prev };
-                                  delete next[trimKey];
-                                  return next;
-                                });
-                                setTestTrims((prev) => {
-                                  const next = { ...prev };
-                                  delete next[trimKey];
-                                  return next;
-                                });
-                              }}
-                            >
-                              <Trash2 className="mr-1 h-3.5 w-3.5" />
-                              Clear
-                            </Button>
-                          </>
-                        ) : null}
-                      </div>
+                                {mTest ? (
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="text-destructive hover:text-destructive"
+                                    onClick={() => {
+                                      setTestMedia((prev) => {
+                                        const next = { ...prev };
+                                        delete next[pKey];
+                                        return next;
+                                      });
+                                      setTestTrims((prev) => {
+                                        const next = { ...prev };
+                                        delete next[pKey];
+                                        return next;
+                                      });
+                                    }}
+                                  >
+                                    <Trash2 className="mr-1 h-3.5 w-3.5" />
+                                    Clear
+                                  </Button>
+                                ) : null}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
                   );
                 })()}
@@ -3168,6 +3431,17 @@ const TemplateBuilder = () => {
                   className="hidden"
                   onChange={(e) => {
                     void bulkAddMedia(e.target.files);
+                    e.target.value = "";
+                  }}
+                />
+                <input
+                  ref={paneFillRef}
+                  type="file"
+                  accept="image/*,video/*"
+                  multiple
+                  className="hidden"
+                  onChange={(e) => {
+                    void handleFillPanes(e.target.files);
                     e.target.value = "";
                   }}
                 />
@@ -3834,13 +4108,16 @@ const TemplateBuilder = () => {
         currentSec={pickerSec}
         maxSec={pickerMaxSec}
         existing={pickerFor ? testMedia[pickerFor] : undefined}
+        paneMode={pickerPane > 0}
         onAdd={(m, sec) => {
           if (!pickerFor) return;
           setTestMedia((prev) => ({ ...prev, [pickerFor]: m }));
           /* a fresh clip always starts at its beginning — the old cut
              belonged to the old clip */
           setTestTrims((prev) => ({ ...prev, [pickerFor]: 0 }));
+          /* only pane 0 may set the slot's length (D56) */
           if (
+            pickerPane === 0 &&
             sec !== null &&
             pickerSlotDraft &&
             sec !== pickerSlotDraft.dur
@@ -3858,10 +4135,15 @@ const TemplateBuilder = () => {
           onOpenChange={(o) => {
             if (!o) setCutFor(null);
           }}
-          label={`slot ${cutFor.replace("s", "")}`}
+          label={`slot ${Number(cutFor.split("#")[0].slice(1))}${
+            cutFor.includes("#")
+              ? ` · pane ${Number(cutFor.split("#")[1]) + 1}`
+              : ""
+          }`}
           clip={testMedia[cutFor]}
           slotDur={
-            draft.slots[Number(cutFor.slice(1)) - 1]?.dur ?? DEFAULT_SLOT_SEC
+            draft.slots[Number(cutFor.split("#")[0].slice(1)) - 1]?.dur ??
+            DEFAULT_SLOT_SEC
           }
           trimStart={testTrims[cutFor] ?? 0}
           onApply={(t) => setTestTrims((prev) => ({ ...prev, [cutFor]: t }))}

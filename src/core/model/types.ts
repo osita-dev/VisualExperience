@@ -171,6 +171,13 @@ export interface MediaSlot {
   /** the slot's own length in seconds — content picks it, the creator trims it */
   dur: number;
   crop: "fill" | "fit";
+  /**
+   * Composition (D56): absent or "single" = one full-frame pane; a
+   * split/collage id = the slot shows that many media panes. Pane 0 is
+   * the primary: it drives the slot's length and is the only pane whose
+   * own sound can play (others are muted under the music).
+   */
+  layout?: string;
   shortClip?: "freeze" | "loop";
   blockPresets?: PresetRef[];
   sounds?: SlotSounds;

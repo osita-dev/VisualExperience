@@ -44,9 +44,18 @@ import {
 import { TEXT_EXITS } from "@/presets/textCatalog";
 
 /* the builder's SlotDraft sentinels, mirrored here (lib must not import
- * the page): effect/transition sounds use SOUND_AUTO, soundCut "none" —
- * the director never sets "none" on cuts: cuts always get a random SFX */
+ * the page): effect/transition sounds use SOUND_AUTO, soundCut "none".
+ * The director now SPARES sound — it sets "none" on the cuts it leaves
+ * quiet, so a slot only sounds off where the moment earned it. */
 const SOUND_AUTO = "auto";
+const SOUND_OFF = "none";
+
+/** How many cut/transition/effect SFX the director will place in a whole
+ *  edit (D58). An SFX on every cut is noise; a few spaced hits read as
+ *  deliberate. Slot 0 has no cut of its own, so it never takes a hit. */
+export const SFX_MAX = 3;
+/** two hits closer than this many slots read as a flurry, not accents */
+const SFX_MIN_GAP = 1;
 
 /* ------------------------------------------------------------------ *
  * pools — every value below is a legal pick for its field (V8 clean)
@@ -299,7 +308,36 @@ export function directTransitions<
   return out;
 }
 
-/** A random SFX per slot from the right catalog category. */
+/**
+ * The few slots that EARN an SFX this pass (D58). At most `cap` of them,
+ * never two neighbours (a flurry), and slot 0 is skipped — it has no cut
+ * of its own. Random, but decided here once and then stored, so the
+ * preview and the export always agree.
+ */
+function sfxSpots(count: number, cap = SFX_MAX, skipFirst = true): Set<number> {
+  const first = skipFirst ? 1 : 0;
+  const eligible: number[] = [];
+  for (let i = first; i < count; i++) eligible.push(i);
+  const shuffled = shuffledIndices(eligible.length);
+  const chosen = new Set<number>();
+  for (const idx of shuffled) {
+    if (chosen.size >= cap) break;
+    const slot = eligible[idx];
+    /* never land right next to a hit we already placed */
+    let tooClose = false;
+    for (const placed of chosen)
+      if (Math.abs(placed - slot) <= SFX_MIN_GAP) tooClose = true;
+    if (!tooClose) chosen.add(slot);
+  }
+  return chosen;
+}
+
+/**
+ * A few strong SFX across the edit, not one on every cut (D58). Cut,
+ * transition and effect sounds each pick their OWN moments, so they can
+ * line up or stagger on their own — but each is limited to `cap` hits.
+ * Slots left quiet get the honest "none" sentinel.
+ */
 export function directSounds<
   T extends {
     effect: string;
@@ -308,14 +346,27 @@ export function directSounds<
     soundTransition: string;
   },
 >(slots: readonly T[], opts?: DirectOpts): T[] {
+  const scoped = new Set(
+    slots.map((_, i) => i).filter((i) => inScope(opts?.only, i)),
+  );
+  /* one chooser per sound kind — moments are picked independently */
+  const cutSpots = sfxSpots(slots.length);
+  const transSpots = sfxSpots(slots.length);
+  const fxSpots = sfxSpots(slots.length);
   return slots.map((s, i) => {
-    if (!inScope(opts?.only, i)) return s;
+    /* out of scope (bulk dress): untouched, keep whatever it had */
+    if (!scoped.has(i)) return s;
+    /* no effect → nothing to override: stay on the honest default */
+    const fxable = s.effect !== "none";
     return {
       ...s,
-      soundCut: pick(CUT_SFX),
-      soundTransition: pick(TRANS_SFX),
-      // no effect → nothing to override: stay on the honest default
-      soundEffect: s.effect === "none" ? SOUND_AUTO : pick(FX_SFX),
+      soundCut: cutSpots.has(i) ? pick(CUT_SFX) : SOUND_OFF,
+      soundTransition: transSpots.has(i) ? pick(TRANS_SFX) : SOUND_OFF,
+      soundEffect: !fxable
+        ? SOUND_AUTO
+        : fxSpots.has(i)
+          ? pick(FX_SFX)
+          : SOUND_AUTO,
     };
   });
 }
@@ -330,6 +381,283 @@ export function directTexts<T extends { anim: string; outAnim: string }>(
     anim: pick(ENTRANCE_POOL),
     outAnim: Math.random() < 0.5 ? "" : pick(EXIT_POOL),
   }));
+}
+
+/* ------------------------------------------------------------------ *
+ * text placement (D57) — where each text SITS on the 9:16 frame
+ * ------------------------------------------------------------------ */
+
+/** A text's placement shape, in canvas fractions (0..1). */
+export interface TextShape {
+  /** horizontal centre 0..1 */
+  x: number;
+  /** vertical centre 0..1 */
+  y: number;
+  /** half-width of the text's box, as a fraction of canvas WIDTH */
+  w: number;
+  /** half-height of the text's box, as a fraction of canvas HEIGHT */
+  h: number;
+  /** when the text is on screen, absolute seconds */
+  start: number;
+  /** how long it stays, seconds */
+  dur: number;
+}
+
+/* designed good spots (x, y) on a 9:16 frame — thirds, bands and
+ * corners. Spread apart so a scatter reads as composed, not spilled. */
+/* Designed good spots on a 9:16 frame, grouped into MIXES. A single flat
+ * list can't vary: with 2 texts on screen, a lone "middle" band blocks
+ * every same-height side spot, so every roll landed on the same two
+ * positions. Instead each roll picks ONE shape (a vertical band, or a
+ * center/side, left/right or 2-column arrangement) and fills it. Shape
+ * now changes visibly between rolls, like transitions/motion do. */
+const SPOT_BANDS = {
+  top: [0.16],
+  upper: [0.32],
+  middle: [0.5],
+  lower: [0.68],
+  bottom: [0.84],
+} as const;
+type BandKey = keyof typeof SPOT_BANDS;
+const BAND_KEYS = Object.keys(SPOT_BANDS) as BandKey[];
+
+/* one text, dropped into a named vertical band */
+const SOLO: readonly [number, number][] = BAND_KEYS.map((k) => [
+  0.5,
+  SPOT_BANDS[k][0],
+]);
+
+/* two texts side by side, in a chosen band */
+const SIDE_BY_SIDE: readonly (readonly [number, number])[] = BAND_KEYS.flatMap(
+  (k): (readonly [number, number])[] => [
+    [0.28, SPOT_BANDS[k][0]],
+    [0.72, SPOT_BANDS[k][0]],
+    [0.3, SPOT_BANDS[k][0]],
+    [0.7, SPOT_BANDS[k][0]],
+  ],
+);
+
+/* center above side, or a loose diagonal */
+const CENTER_THEN_SIDE: readonly (readonly [number, number])[] = [
+  [0.5, 0.34],
+  [0.28, 0.66],
+  [0.5, 0.34],
+  [0.72, 0.66],
+  [0.3, 0.28],
+  [0.7, 0.72],
+  [0.7, 0.28],
+  [0.3, 0.72],
+];
+
+/* nothing may sit in these slivers: the top ~6% and bottom ~8% are
+ * where 9:16 apps draw their own chrome, so text there gets covered */
+const SAFE_TOP = 0.07;
+const SAFE_BOTTOM = 0.92;
+const SAFE_SIDE = 0.04;
+/* two texts closer than this (in box terms) read as stacked */
+const OVERLAP_PAD = 0.02;
+
+/** Honest overlap test between two placed boxes (both centre-anchored,
+ *  half-extents). True when they'd visually collide. */
+export function textBoxesClash(
+  a: { x: number; y: number; w: number; h: number },
+  b: { x: number; y: number; w: number; h: number },
+): boolean {
+  return (
+    Math.abs(a.x - b.x) < a.w + b.w + OVERLAP_PAD &&
+    Math.abs(a.y - b.y) < a.h + b.h + OVERLAP_PAD
+  );
+}
+
+/** Is this box clear of the safe slivers and inside the frame? */
+function boxInSafeArea(b: {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}): boolean {
+  return (
+    b.x - b.w >= SAFE_SIDE &&
+    b.x + b.w <= 1 - SAFE_SIDE &&
+    b.y - b.h >= SAFE_TOP &&
+    b.y + b.h <= SAFE_BOTTOM
+  );
+}
+
+/**
+ * Place texts across the frame by rolling a SHAPE each time, so the
+ * arrangement visibly changes between rolls instead of collapsing onto
+ * the same two spots. Texts ON SCREEN AT THE SAME TIME can never clash;
+ * the biggest/longest texts go first so nothing is pushed off-frame.
+ *
+ * The roll is random but decided once and stored by the caller, so
+ * preview ≡ export.
+ *
+ * Returns one {x, y} per input text, in input order.
+ */
+export function placeTexts(
+  texts: readonly TextShape[],
+): { x: number; y: number }[] {
+  /* biggest box first; tie-break on the earlier text */
+  const order = texts.map((_, i) => i).sort((a, b) => {
+    const area = (i: number) => texts[i].w * texts[i].h;
+    return area(b) - area(a) || a - b;
+  });
+
+  /* one shape for the whole arrangement, rolled fresh each call */
+  const kind = pick(["solo", "side", "stagger"] as const);
+  const band = SPOT_BANDS[pick(BAND_KEYS)];
+
+  /* the shape's candidate rows, in the rolled band */
+  const rows: readonly [number, number][] =
+    kind === "side"
+      ? ([
+          [0.28, band[0]],
+          [0.72, band[0]],
+        ] as const)
+      : kind === "stagger"
+        ? ([
+            [0.5, band[0]],
+            [0.28, Math.min(0.84, band[0] + 0.2)],
+            [0.72, band[0]],
+            [0.5, Math.max(0.16, band[0] - 0.2)],
+          ] as const)
+        : ([
+            [0.5, band[0]],
+            [0.5, band[0]],
+            [0.5, band[0]],
+            [0.5, band[0]],
+          ] as const);
+
+  const placed: ({ x: number; y: number } | null)[] = texts.map(() => null);
+  /* for each text, the spots already taken while it is on screen */
+  const busyFor = texts.map(
+    () => [] as { x: number; y: number; w: number; h: number }[],
+  );
+
+  for (const i of order) {
+    const t = texts[i];
+    /* the shape's rows first, then every other band as an honest
+     * fallback so a big text never falls back to its stale spot */
+    const cand: { x: number; y: number }[] = [
+      ...rows.map(([x, y]) => ({ x, y })),
+      ...SOLO.map(([x, y]) => ({ x, y })),
+      ...SIDE_BY_SIDE.map(([x, y]) => ({ x, y })),
+      ...CENTER_THEN_SIDE.map(([x, y]) => ({ x, y })),
+    ];
+
+    let chosen: { x: number; y: number } | null = null;
+    for (const spot of cand) {
+      const b = { x: spot.x, y: spot.y, w: t.w, h: t.h };
+      if (!boxInSafeArea(b)) continue; // this spot can't hold a box this size
+      if (busyFor[i].some((o) => textBoxesClash(b, o))) continue;
+      chosen = { x: spot.x, y: spot.y };
+      break;
+    }
+
+    /* every spot clashed or was too small — keep the text's own spot
+     * rather than hide it or shove it off-frame (honest) */
+    if (!chosen) chosen = { x: t.x, y: t.y };
+    placed[i] = chosen;
+
+    /* reserve this box against every text visible at the same time */
+    const b = { x: chosen.x, y: chosen.y, w: t.w, h: t.h };
+    for (let j = 0; j < texts.length; j++) {
+      if (j === i) continue;
+      const o = texts[j];
+      const sameTime = t.start < o.start + o.dur && o.start < t.start + t.dur;
+      if (sameTime) busyFor[j].push(b);
+    }
+  }
+
+  return placed.map((p) => p ?? { x: 0.5, y: 0.5 });
+}
+
+/** Honest placeholder copy for an ADDED text — the creator replaces it
+ *  with their own words (same as a template's `default` today). These
+ *  are prompts, never presented as the finished line. */
+const PLACEHOLDER_COPY = [
+  "YOUR TITLE",
+  "ADD A LINE",
+  "ONE MORE THING",
+  "WATCH THIS",
+  "WAIT FOR IT",
+  "NO WAY",
+];
+
+/** Cap on texts the director will add per template (D57). */
+export const TEXT_TARGET_MAX = 4;
+
+/**
+ * Make sure a template has enough texts to scatter (up to
+ * `target`, capped at TEXT_TARGET_MAX): existing texts are re-placed;
+ * missing ones are ADDED with placeholder copy and a spread start time.
+ *
+ * `existing` supplies the placement shape for texts already present;
+ * each added text inherits the shape of the text it was counted against
+ * (so a template with one big title still gets a fitting second line).
+ *
+ * We can't invent `T`'s other fields, so the caller passes a `make`
+ * factory that fills them in (look, weight, animation…); we hand it the
+ * placeholder copy and the start/dur we chose.
+ */
+export function directTextPlacement<
+  T extends { start: number; dur: number; value?: string },
+>(
+  existing: readonly (T & TextShape)[],
+  totalSec: number,
+  make: (seed: { start: number; dur: number; value: string }) => T,
+  target = TEXT_TARGET_MAX,
+): {
+  texts: T[];
+  /** index → {x, y} for every returned text (existing + added) */
+  placed: { x: number; y: number }[];
+} {
+  const want = Math.max(1, Math.min(target, TEXT_TARGET_MAX));
+  const out: T[] = existing.map((t) => ({ ...t }));
+  /* the shape each out[i] sits in — existing keep theirs; an added text
+   * echoes the text it was counted against, a touch smaller */
+  const shapes: TextShape[] = existing.map((s) => ({
+    x: s.x,
+    y: s.y,
+    w: s.w,
+    h: s.h,
+    start: s.start,
+    dur: s.dur,
+  }));
+
+  const pool = shuffledIndices(PLACEHOLDER_COPY.length);
+  let next = 0;
+  /* add missing texts, spreading their starts across the video */
+  while (out.length < want) {
+    const k = out.length;
+    const start = Math.round(((totalSec * k) / want / 0.5)) * 0.5;
+    const dur = Math.max(0.5, Math.min(2.5, totalSec - start));
+    /* echo a text that already exists, or a plain default if there
+     * were none to begin with (a template can start with zero texts) */
+    const src = shapes.length
+      ? shapes[Math.floor(k / 2) % shapes.length]
+      : { x: 0.5, y: 0.5, w: 0.3, h: 0.05 };
+    /* a fresh line sits a touch smaller than the text it echoes, so a
+     * scatter never out-shouts the title it sits beside */
+    shapes.push({
+      x: src.x,
+      y: src.y,
+      w: src.w * 0.8,
+      h: src.h * 0.8,
+      start,
+      dur,
+    });
+    out.push(make({ start, dur, value: PLACEHOLDER_COPY[pool[next++ % pool.length]] }));
+  }
+
+  const placed = placeTexts(shapes);
+  const texts = out.map((t, i) => ({
+    ...t,
+    x: placed[i].x,
+    y: placed[i].y,
+  }));
+  return { texts, placed };
 }
 
 /* ------------------------------------------------------------------ *

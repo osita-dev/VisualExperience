@@ -3,6 +3,18 @@
  * no dependency needed for two object stores' worth of work.
  */
 
+/** One pane's saved media in a composition slot (D56, split/collage). */
+export interface SavedPane {
+  /** the actual File — structured-clone stored so reopen restores media */
+  file?: Blob & { name?: string };
+  isVideo?: boolean;
+  duration?: number;
+  width?: number;
+  height?: number;
+  thumb?: string;
+  trimStart: number;
+}
+
 export interface SavedSlot {
   kind: "media" | "text";
   /** the actual File — structured-clone stored so reopen restores media */
@@ -15,6 +27,8 @@ export interface SavedSlot {
   trimStart: number;
   soundOn: boolean;
   text?: string;
+  /** panes 1..N of a composition slot (holes keep the pane index) */
+  panes?: (SavedPane | undefined)[];
 }
 
 export interface SavedProject {

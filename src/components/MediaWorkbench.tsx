@@ -36,6 +36,11 @@ interface Props {
   /** how many seconds this slot may grow to (remaining total budget) */
   maxSec: number;
   existing?: ProbedMedia;
+  /**
+   * Composition pane ≥1 (D56): the pane fills the slot's existing
+   * length — pane 0 is the primary and the only one that may set it.
+   */
+  paneMode?: boolean;
   /** sec = null keeps the slot's current length (photos) */
   onAdd: (m: ProbedMedia, sec: number | null) => void;
 }
@@ -47,12 +52,15 @@ export function MediaWorkbench({
   currentSec,
   maxSec,
   existing,
+  paneMode = false,
   onAdd,
 }: Props) {
   const [picked, setPicked] = useState<ProbedMedia | null>(null);
   const [busy, setBusy] = useState<Busy>(null);
   const [dragging, setDragging] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  /* a pane key is `s3#2` — the slot is the part before the `#` */
+  const paneIdx = slot.id.includes("#") ? Number(slot.id.split("#")[1]) : 0;
 
   useEffect(() => {
     if (open) {
@@ -100,7 +108,17 @@ export function MediaWorkbench({
     if (!picked || busy) return;
     if (!picked.isVideo) {
       onAdd(picked, null);
-      toast.success(`Photo added — slot stays at ${fmtSec(currentSec)}.`);
+      toast.success(
+        paneMode
+          ? "Photo added to the pane."
+          : `Photo added — slot stays at ${fmtSec(currentSec)}.`,
+      );
+      return;
+    }
+    /* a pane ≥1 never sets the length — pane 0 owns it (D56) */
+    if (paneMode) {
+      onAdd(picked, null);
+      toast.success(`Pane filled — plays the slot's ${fmtSec(currentSec)}.`);
       return;
     }
     onAdd(picked, videoSec);
@@ -121,13 +139,20 @@ export function MediaWorkbench({
     >
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>Media for slot {slot.id.replace("s", "#")}</DialogTitle>
+          <DialogTitle>
+            Media for slot {slot.id.split("#")[0].replace("s", "#")}
+            {paneIdx > 0 ? ` · pane ${paneIdx + 1}` : ""}
+          </DialogTitle>
           <DialogDescription>
             {!picked
               ? "Pick a photo or video — you'll preview it before it goes in."
-              : picked.isVideo
-                ? "The slot takes your clip's length."
-                : "Photo — the slot keeps its current length."}
+              : paneMode
+                ? picked.isVideo
+                  ? "Panes play the slot's length — the first pane sets it."
+                  : "Photo — fills the pane for the slot's whole length."
+                : picked.isVideo
+                  ? "The slot takes your clip's length."
+                  : "Photo — the slot keeps its current length."}
           </DialogDescription>
         </DialogHeader>
 
@@ -209,23 +234,35 @@ export function MediaWorkbench({
 
               {picked.isVideo ? (
                 <div className="space-y-2">
-                  {/* live math — the slot's length, derived from the clip */}
-                  <div className="rounded-lg bg-secondary/70 px-3 py-2 text-xs leading-relaxed text-secondary-foreground">
-                    Clip{" "}
-                    <span className="font-semibold tabular-nums text-primary">
-                      {fmtSec(picked.duration)}
-                    </span>{" "}
-                    → slot{" "}
-                    <span className="font-semibold tabular-nums text-primary">
-                      {fmtSec(videoSec)}
-                    </span>
-                  </div>
-                  {rawSec > videoSec ? (
-                    <p className="text-[11px] text-muted-foreground">
-                      Capped by the {MAX_TOTAL_SEC}s total budget — shorten
-                      another slot first if you need more.
+                  {paneMode ? (
+                    <p className="rounded-lg bg-secondary/70 px-3 py-2 text-xs text-secondary-foreground">
+                      Plays the slot's{" "}
+                      <span className="font-semibold tabular-nums text-primary">
+                        {fmtSec(currentSec)}
+                      </span>{" "}
+                      — pane 1 sets the length.
                     </p>
-                  ) : null}
+                  ) : (
+                    <>
+                      {/* live math — the slot's length, derived from the clip */}
+                      <div className="rounded-lg bg-secondary/70 px-3 py-2 text-xs leading-relaxed text-secondary-foreground">
+                        Clip{" "}
+                        <span className="font-semibold tabular-nums text-primary">
+                          {fmtSec(picked.duration)}
+                        </span>{" "}
+                        → slot{" "}
+                        <span className="font-semibold tabular-nums text-primary">
+                          {fmtSec(videoSec)}
+                        </span>
+                      </div>
+                      {rawSec > videoSec ? (
+                        <p className="text-[11px] text-muted-foreground">
+                          Capped by the {MAX_TOTAL_SEC}s total budget — shorten
+                          another slot first if you need more.
+                        </p>
+                      ) : null}
+                    </>
+                  )}
                 </div>
               ) : (
                 <p className="rounded-lg bg-secondary/70 px-3 py-2 text-xs text-secondary-foreground">

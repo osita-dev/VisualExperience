@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
@@ -26,7 +26,10 @@ import { TextSlotEditor } from "@/components/TextSlotEditor";
 import type { PlayerHandle } from "@/hooks/usePlayer";
 import { useProject } from "@/hooks/useProject";
 import { mediaWarnings, type ProbedMedia } from "@/lib/mediaUtils";
+import { ingestWithToast } from "@/lib/ingest";
 import { fmtSec } from "@/lib/format";
+import { cn } from "@/lib/utils";
+import { paneCount } from "@/core/media/layouts";
 import { getTemplateEntry } from "@/templates/library";
 import { metrics } from "@/templates/registry";
 import type { MediaSlot } from "@/core/model/types";
@@ -40,9 +43,18 @@ const SlotFiller = () => {
   const template = entry && entry.issues.length === 0 ? entry.template : undefined;
 
   const [selected, setSelected] = useState<string | null>(null);
-  const [pickerFor, setPickerFor] = useState<MediaSlot | null>(null);
+  const [pickerFor, setPickerFor] = useState<{
+    slot: MediaSlot;
+    pane: number;
+  } | null>(null);
   const [handle, setHandle] = useState<PlayerHandle | null>(null);
   const [saving, setSaving] = useState(false);
+  /* the multi-file picker that fills a composition slot's panes (D56) */
+  const paneFillRef = useRef<HTMLInputElement>(null);
+  /* every photo/video chosen this session, oldest first — a single pick
+     into a split/collage slot carries the NEXT ones into its empty panes
+     (D59), so the user never re-opens the gallery for the same layout */
+  const [sessionMedia, setSessionMedia] = useState<ProbedMedia[]>([]);
 
   useEffect(() => {
     if (template) project.loadTemplate(template);
@@ -105,6 +117,82 @@ const SlotFiller = () => {
   const textSlot = template.tracks.overlay.find((s) => s.id === selected) ?? null;
   const selectedState = selected ? project.states[selected] : undefined;
 
+  /* one pane's content (pane 0 = the slot's own media/trim) */
+  const paneMedia = (
+    slotId: string,
+    pane: number,
+  ): { media?: ProbedMedia; trimStart: number } | undefined => {
+    const st = project.states[slotId];
+    if (pane === 0)
+      return st?.media ? { media: st.media, trimStart: st.trimStart } : undefined;
+    return st?.panes?.[pane - 1];
+  };
+
+  /* Composition (D56): "Fill panes" — one multi-file pick fills this
+     slot's EMPTY panes in order (a split needs 2, a collage 3–4) */
+  const handleFillPanes = async (files: FileList | null) => {
+    const list = Array.from(files ?? []);
+    if (!list.length || !mediaSlot) return;
+    const paneN = paneCount(mediaSlot.layout);
+    const empties: number[] = [];
+    for (let p = 0; p < paneN; p++)
+      if (!paneMedia(mediaSlot.id, p)?.media) empties.push(p);
+    if (!empties.length) {
+      toast("Every pane already has media — use Change on a pane.");
+      return;
+    }
+    let filled = 0;
+    for (let k = 0; k < Math.min(list.length, empties.length); k++) {
+      try {
+        /* probes; a video the browser refuses is converted on-device */
+        const m = await ingestWithToast(list[k]);
+        project.setMedia(mediaSlot.id, m, empties[k]);
+        filled++;
+      } catch {
+        /* ingestWithToast already showed the honest error — keep going */
+      }
+    }
+    if (filled > 0)
+      toast.success(`Filled ${filled} pane${filled === 1 ? "" : "s"}.`);
+  };
+
+  /* Composition (D59): the NEXT picks fill this slot's empty panes, in
+     order. A photo the user already chose this session is reused before
+     the gallery is opened again — no extra upload for a split/collage. */
+  const fillRestPanes = (slot: MediaSlot, pane: number, m: ProbedMedia) => {
+    const paneN = paneCount(slot.layout);
+    if (paneN <= 1) return 0;
+    /* which panes are already taken — read ONCE, because the batched
+       setMedia calls below all see the same (stale) render state */
+    const busy = new Set<number>();
+    for (let p = 0; p < paneN; p++) {
+      const cur = p === pane ? m : paneMedia(slot.id, p)?.media;
+      if (cur) busy.add(p);
+    }
+    const empties: number[] = [];
+    for (let p = 0; p < paneN; p++)
+      if (p !== pane && !busy.has(p)) empties.push(p);
+    if (!empties.length) return 0;
+
+    const next = [...sessionMedia];
+    /* never loop the same photo into two panes of one slot */
+    const used = new Set<string>([m.url]);
+    let filled = 0;
+    for (const p of empties) {
+      /* an unused pick from this session, else stop and leave the pane
+         honestly empty — we never invent or repeat media */
+      const idx = next.findIndex((c) => !used.has(c.url));
+      if (idx < 0) break;
+      const pick = next[idx];
+      next.splice(idx, 1);
+      used.add(pick.url);
+      project.setMedia(slot.id, pick, p);
+      filled++;
+    }
+    setSessionMedia(next);
+    return filled;
+  };
+
   const handleSave = async () => {
     setSaving(true);
     const res = await project.save();
@@ -165,7 +253,7 @@ const SlotFiller = () => {
                 schedule={schedule}
                 bindings={project.bindings}
                 soundOn={soundOnMap}
-                dirtyKey={`${selected}-${selectedState?.trimStart}-${selectedState?.text ?? ""}`}
+                dirtyKey={`${selected}-${selectedState?.trimStart}-${(selectedState?.panes ?? []).map((p) => p.media?.url ?? "").join("|")}-${selectedState?.text ?? ""}`}
                 onReady={setHandle}
               />
             </div>
@@ -235,83 +323,193 @@ const SlotFiller = () => {
 
         {/* contextual panel */}
         {mediaSlot ? (
-          <Panel title={`Media slot ${mediaSlot.id}`}>
-            {selectedState?.media ? (
-              <div className="space-y-3">
-                <div className="flex gap-3">
-                  {selectedState.media.thumb ? (
-                    <img
-                      src={selectedState.media.thumb}
-                      alt=""
-                      className="h-24 w-[54px] shrink-0 rounded-lg border border-border object-cover"
-                    />
+          <Panel
+            title={
+              paneCount(mediaSlot.layout) > 1
+                ? `Media slot ${mediaSlot.id} · ${paneCount(mediaSlot.layout)} panes`
+                : `Media slot ${mediaSlot.id}`
+            }
+          >
+            {(() => {
+              const panes = paneCount(mediaSlot.layout);
+              /* -------- one full-frame pane: the classic single card -------- */
+              if (panes === 1) {
+                const st = paneMedia(mediaSlot.id, 0);
+                if (!st?.media)
+                  return (
+                    <Button
+                      variant="outline"
+                      className="w-full border-dashed"
+                      onClick={() => setPickerFor({ slot: mediaSlot, pane: 0 })}
+                    >
+                      <ImagePlus className="mr-2 h-4 w-4" />
+                      Add a {mediaSlot.accepts.join(" or ")}
+                    </Button>
+                  );
+                return (
+                  <div className="space-y-3">
+                    <div className="flex gap-3">
+                      {st.media.thumb ? (
+                        <img
+                          src={st.media.thumb}
+                          alt=""
+                          className="h-24 w-[54px] shrink-0 rounded-lg border border-border object-cover"
+                        />
+                      ) : null}
+                      <div className="min-w-0 flex-1 space-y-1 text-xs text-muted-foreground">
+                        <p className="font-semibold text-foreground">
+                          {st.media.isVideo ? "Video" : "Photo"} ·{" "}
+                          {slotDur(mediaSlot.id).toFixed(1)}s slot
+                        </p>
+                        {st.media.isVideo ? (
+                          <p className="tabular-nums">
+                            Window {st.trimStart.toFixed(1)}s →{" "}
+                            {(st.trimStart + slotDur(mediaSlot.id)).toFixed(1)}s of{" "}
+                            {fmtSec(st.media.duration)}
+                          </p>
+                        ) : (
+                          <p>Center-cropped to 9:16</p>
+                        )}
+                        {mediaWarnings(st.media, slotDur(mediaSlot.id)).map((w) => (
+                          <p key={w.id} className="flex items-start gap-1.5 text-primary">
+                            <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+                            {w.message}
+                          </p>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="flex-1"
+                        onClick={() => setPickerFor({ slot: mediaSlot, pane: 0 })}
+                      >
+                        <ImagePlus className="mr-1.5 h-3.5 w-3.5" />
+                        Change / trim
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="flex-1 text-destructive hover:text-destructive"
+                        onClick={() => project.setMedia(mediaSlot.id, null, 0)}
+                      >
+                        <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+                        Remove
+                      </Button>
+                    </div>
+                    {project.can(mediaSlot, "toggle_original_sound") ? (
+                      <div className="flex items-center justify-between rounded-lg bg-secondary/60 px-3 py-2">
+                        <Label htmlFor={`snd-${mediaSlot.id}`} className="text-xs">
+                          Keep original sound
+                        </Label>
+                        <Switch
+                          id={`snd-${mediaSlot.id}`}
+                          checked={selectedState?.soundOn ?? false}
+                          disabled={!st.media.isVideo}
+                          onCheckedChange={(v) => project.setSoundOn(mediaSlot.id, v)}
+                        />
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              }
+              /* -------- Composition (D56): every pane asks, right here -------- */
+              return (
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => paneFillRef.current?.click()}
+                    >
+                      <ImagePlus className="mr-1.5 h-3.5 w-3.5" />
+                      Fill panes
+                    </Button>
+                    <span className="text-[11px] text-muted-foreground">
+                      pick several at once — or add one and the rest reuse
+                      your next picks
+                    </span>
+                  </div>
+                  {Array.from({ length: panes }, (_, p) => {
+                    const st = paneMedia(mediaSlot.id, p);
+                    return (
+                      <div
+                        key={p}
+                        className={cn(
+                          "flex flex-wrap items-center gap-2 rounded-lg border px-2.5 py-2",
+                          st?.media
+                            ? "border-border/70 bg-secondary/40"
+                            : "border-dashed border-primary/50 bg-primary/5",
+                        )}
+                      >
+                        <span className="text-[11px] font-semibold text-foreground">
+                          Pane {p + 1}
+                        </span>
+                        {st?.media?.thumb ? (
+                          <img
+                            src={st.media.thumb}
+                            alt=""
+                            className="h-8 w-[18px] rounded border border-border object-cover"
+                          />
+                        ) : null}
+                        {st?.media?.isVideo ? (
+                          <span className="text-[11px] tabular-nums text-muted-foreground">
+                            Window {st.trimStart.toFixed(1)}s →{" "}
+                            {(st.trimStart + slotDur(mediaSlot.id)).toFixed(1)}s of{" "}
+                            {fmtSec(st.media.duration)}
+                          </span>
+                        ) : (
+                          <span className="text-[11px] text-muted-foreground">
+                            {p === 0
+                              ? "sets the length · its sound can play"
+                              : "muted under the music"}
+                          </span>
+                        )}
+                        <div className="flex-1" />
+                        {!st?.media ? (
+                          <span className="text-[11px] text-muted-foreground">
+                            fills with your next pick
+                          </span>
+                        ) : null}
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setPickerFor({ slot: mediaSlot, pane: p })}
+                        >
+                          <ImagePlus className="mr-1.5 h-3.5 w-3.5" />
+                          {st?.media ? "Change" : "Add"}
+                        </Button>
+                        {st?.media ? (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-destructive hover:text-destructive"
+                            onClick={() => project.setMedia(mediaSlot.id, null, p)}
+                          >
+                            <Trash2 className="mr-1 h-3.5 w-3.5" />
+                            Remove
+                          </Button>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                  {project.can(mediaSlot, "toggle_original_sound") ? (
+                    <div className="flex items-center justify-between rounded-lg bg-secondary/60 px-3 py-2">
+                      <Label htmlFor={`snd-${mediaSlot.id}`} className="text-xs">
+                        Keep original sound (first pane)
+                      </Label>
+                      <Switch
+                        id={`snd-${mediaSlot.id}`}
+                        checked={selectedState?.soundOn ?? false}
+                        disabled={!paneMedia(mediaSlot.id, 0)?.media?.isVideo}
+                        onCheckedChange={(v) => project.setSoundOn(mediaSlot.id, v)}
+                      />
+                    </div>
                   ) : null}
-                  <div className="min-w-0 flex-1 space-y-1 text-xs text-muted-foreground">
-                    <p className="font-semibold text-foreground">
-                      {selectedState.media.isVideo ? "Video" : "Photo"} ·{" "}
-                      {slotDur(mediaSlot.id).toFixed(1)}s slot
-                    </p>
-                    {selectedState.media.isVideo ? (
-                      <p className="tabular-nums">
-                        Window {selectedState.trimStart.toFixed(1)}s →{" "}
-                        {(selectedState.trimStart + slotDur(mediaSlot.id)).toFixed(1)}s of{" "}
-                        {fmtSec(selectedState.media.duration)}
-                      </p>
-                    ) : (
-                      <p>Center-cropped to 9:16</p>
-                    )}
-                    {mediaWarnings(selectedState.media, slotDur(mediaSlot.id)).map((w) => (
-                      <p key={w.id} className="flex items-start gap-1.5 text-primary">
-                        <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
-                        {w.message}
-                      </p>
-                    ))}
-                  </div>
                 </div>
-                <div className="flex gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="flex-1"
-                    onClick={() => setPickerFor(mediaSlot)}
-                  >
-                    <ImagePlus className="mr-1.5 h-3.5 w-3.5" />
-                    Change / trim
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="flex-1 text-destructive hover:text-destructive"
-                    onClick={() => project.setMedia(mediaSlot.id, null)}
-                  >
-                    <Trash2 className="mr-1.5 h-3.5 w-3.5" />
-                    Remove
-                  </Button>
-                </div>
-                {project.can(mediaSlot, "toggle_original_sound") ? (
-                  <div className="flex items-center justify-between rounded-lg bg-secondary/60 px-3 py-2">
-                    <Label htmlFor={`snd-${mediaSlot.id}`} className="text-xs">
-                      Keep original sound
-                    </Label>
-                    <Switch
-                      id={`snd-${mediaSlot.id}`}
-                      checked={selectedState.soundOn}
-                      disabled={!selectedState.media.isVideo}
-                      onCheckedChange={(v) => project.setSoundOn(mediaSlot.id, v)}
-                    />
-                  </div>
-                ) : null}
-              </div>
-            ) : (
-              <Button
-                variant="outline"
-                className="w-full border-dashed"
-                onClick={() => setPickerFor(mediaSlot)}
-              >
-                <ImagePlus className="mr-2 h-4 w-4" />
-                Add a {mediaSlot.accepts.join(" or ")}
-              </Button>
-            )}
+              );
+            })()}
           </Panel>
         ) : null}
 
@@ -378,22 +576,51 @@ const SlotFiller = () => {
         </div>
       </main>
 
+      {/* Composition (D56): one pick → the phone's gallery with
+          multi-select — files land in this slot's empty panes in order */}
+      <input
+        ref={paneFillRef}
+        type="file"
+        accept="image/*,video/*"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          void handleFillPanes(e.target.files);
+          e.target.value = "";
+        }}
+      />
+
       <MediaPickerDialog
         open={pickerFor !== null}
         onOpenChange={(o) => {
           if (!o) setPickerFor(null);
         }}
-        slot={pickerFor ?? template.tracks.media[0]}
-        slotDur={pickerFor ? slotDur(pickerFor.id) : 0}
-        existing={
-          pickerFor ? project.states[pickerFor.id]?.media : undefined
+        slot={pickerFor?.slot ?? template.tracks.media[0]}
+        slotDur={pickerFor ? slotDur(pickerFor.slot.id) : 0}
+        existing={pickerFor ? paneMedia(pickerFor.slot.id, pickerFor.pane)?.media : undefined}
+        trimStart={
+          pickerFor ? (paneMedia(pickerFor.slot.id, pickerFor.pane)?.trimStart ?? 0) : 0
         }
-        trimStart={pickerFor ? (project.states[pickerFor.id]?.trimStart ?? 0) : 0}
         onPick={(m: ProbedMedia, trimStart: number) => {
           if (!pickerFor) return;
-          project.setMedia(pickerFor.id, m);
-          project.setTrim(pickerFor.id, trimStart);
-          toast.success(`Added to slot ${pickerFor.id.replace("s", "")}`);
+          project.setMedia(pickerFor.slot.id, m, pickerFor.pane);
+          project.setTrim(pickerFor.slot.id, trimStart, pickerFor.pane);
+          /* remember this pick so a later pane can reuse it (D59) */
+          setSessionMedia((prev) => [
+            ...prev.filter((c) => c.url !== m.url),
+            m,
+          ]);
+          const carried = fillRestPanes(
+            pickerFor.slot,
+            pickerFor.pane,
+            m,
+          );
+          toast.success(
+            `Added to slot ${pickerFor.slot.id.replace("s", "")}${
+              pickerFor.pane > 0 ? `, pane ${pickerFor.pane + 1}` : ""
+            }${carried > 0 ? ` · filled ${carried} more` : ""}`,
+          );
+          setPickerFor(null);
         }}
       />
     </div>

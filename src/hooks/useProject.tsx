@@ -24,6 +24,7 @@ import type {
 } from "@/core/model/types";
 import { resolve } from "@/core/resolve/resolve";
 import { PRESET_MAP } from "@/presets/data";
+import { paneCount, paneKey } from "@/core/media/layouts";
 import type { Bindings, MediaBinding } from "@/player/frame";
 import { probeFile, type ProbedMedia } from "@/lib/mediaUtils";
 import {
@@ -31,13 +32,21 @@ import {
   makeMediaBinding,
 } from "@/lib/mediaBinding";
 import { ensureLocalMusic } from "@/lib/localMusic";
-import type { SavedProject } from "@/hooks/useProjectsDB";
+import type { SavedPane, SavedProject } from "@/hooks/useProjectsDB";
 import { newProjectId, saveProject } from "@/hooks/useProjectsDB";
 import { getTemplateEntry } from "@/templates/library";
+
+/** One extra pane's content in a composition slot (D56, split/collage). */
+export interface PaneState {
+  media?: ProbedMedia;
+  trimStart: number;
+}
 
 export interface SlotState {
   kind: "media" | "text";
   media?: ProbedMedia;
+  /** panes 1..N of a composition slot (pane 0 lives in `media`) */
+  panes?: PaneState[];
   trimStart: number;
   soundOn: boolean;
   text?: string;
@@ -61,8 +70,8 @@ export interface ProjectValue {
     action: UserAction,
   ) => boolean;
   loadTemplate: (t: Template) => void;
-  setMedia: (slotId: string, m: ProbedMedia | null) => void;
-  setTrim: (slotId: string, v: number) => void;
+  setMedia: (slotId: string, m: ProbedMedia | null, pane?: number) => void;
+  setTrim: (slotId: string, v: number, pane?: number) => void;
   setSoundOn: (slotId: string, v: boolean) => void;
   setText: (slotId: string, v: string) => void;
   save: () => Promise<SaveResult>;
@@ -90,27 +99,34 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   const templateIdRef = useRef<string | null>(null);
   const projectIdRef = useRef<string | null>(null);
 
-  /* -------- elements follow content (created lazily, disposed on change) -------- */
+  /* -------- elements follow content (created lazily, disposed on change) --------
+     Composition (D56): pane 0 keeps the slot's own key; extra panes are
+     bound under `slotId#pane` and never routed for sound (pane 0 only). */
   useEffect(() => {
     const next: Bindings = {};
     const keep = new Set<string>();
-    for (const [slotId, st] of Object.entries(states)) {
-      if (st.kind !== "media" || !st.media) continue;
-      keep.add(slotId);
-      const existing = elsRef.current.get(slotId);
-      if (existing && existing.url === st.media.url) {
-        next[slotId] = existing;
-        continue;
+    const put = (key: string, m: ProbedMedia | undefined) => {
+      if (!m) return;
+      keep.add(key);
+      const existing = elsRef.current.get(key);
+      if (existing && existing.url === m.url) {
+        next[key] = existing;
+        return;
       }
       if (existing) disposeMediaBinding(existing);
-      const b = makeMediaBinding(slotId, st.media);
-      elsRef.current.set(slotId, b);
-      next[slotId] = b;
+      const b = makeMediaBinding(key, m);
+      elsRef.current.set(key, b);
+      next[key] = b;
+    };
+    for (const [slotId, st] of Object.entries(states)) {
+      if (st.kind !== "media") continue;
+      put(slotId, st.media);
+      st.panes?.forEach((p, i) => put(paneKey(slotId, i + 1), p.media));
     }
-    for (const [slotId, b] of [...elsRef.current]) {
-      if (!keep.has(slotId)) {
+    for (const [key, b] of [...elsRef.current]) {
+      if (!keep.has(key)) {
         disposeMediaBinding(b);
-        elsRef.current.delete(slotId);
+        elsRef.current.delete(key);
       }
     }
     // bindings are handles to external DOM elements derived from state
@@ -137,6 +153,9 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       } else {
         trims[id] = st.trimStart;
         soundOn[id] = st.soundOn;
+        st.panes?.forEach((p, i) => {
+          trims[paneKey(id, i + 1)] = p.trimStart;
+        });
       }
     }
     return { texts, trims, soundOn };
@@ -184,13 +203,26 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const setMedia = useCallback(
-    (slotId: string, m: ProbedMedia | null) => {
+    (slotId: string, m: ProbedMedia | null, pane = 0) => {
       if (!template) return;
       setStates((prev) => {
         const st = prev[slotId];
         if (!st || st.kind !== "media") return prev;
+        const slotDur = slotSeconds(template, slotId);
+        /* a composition pane: content only — pane 0 owns the slot's length */
+        if (pane > 0) {
+          const panes: PaneState[] = [...(st.panes ?? [])];
+          while (panes.length < pane) panes.push({ trimStart: 0 });
+          const max =
+            m && m.isVideo ? Math.max(0, m.duration - slotDur) : 0;
+          panes[pane - 1] = {
+            media: m ?? undefined,
+            trimStart: Math.min(panes[pane - 1]?.trimStart ?? 0, max),
+          };
+          return { ...prev, [slotId]: { ...st, panes } };
+        }
         const max =
-          m && m.isVideo ? Math.max(0, m.duration - slotSeconds(template, slotId)) : 0;
+          m && m.isVideo ? Math.max(0, m.duration - slotDur) : 0;
         return {
           ...prev,
           [slotId]: {
@@ -213,13 +245,27 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   );
 
   const setTrim = useCallback(
-    (slotId: string, v: number) => {
+    (slotId: string, v: number, pane = 0) => {
       if (!template) return;
       setStates((prev) => {
         const st = prev[slotId];
-        if (!st || !st.media) return prev;
+        if (!st) return prev;
+        const slotDur = slotSeconds(template, slotId);
+        if (pane > 0) {
+          const paneSt = st.panes?.[pane - 1];
+          if (!paneSt?.media) return prev;
+          const max = paneSt.media.isVideo
+            ? Math.max(0, paneSt.media.duration - slotDur)
+            : 0;
+          const clamped = Math.max(0, Math.min(v, max));
+          if (clamped === paneSt.trimStart) return prev;
+          const panes = [...(st.panes ?? [])];
+          panes[pane - 1] = { ...paneSt, trimStart: clamped };
+          return { ...prev, [slotId]: { ...st, panes } };
+        }
+        if (!st.media) return prev;
         const max = st.media.isVideo
-          ? Math.max(0, st.media.duration - slotSeconds(template, slotId))
+          ? Math.max(0, st.media.duration - slotDur)
           : 0;
         const clamped = Math.max(0, Math.min(v, max));
         if (clamped === st.trimStart) return prev;
@@ -269,6 +315,22 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       const st = states[slot.id];
       if (!st) continue;
       if (!thumb && st.media?.thumb) thumb = st.media.thumb;
+      /* Composition (D56): extra panes save as plain slot content */
+      const paneSaves = (st.panes ?? []).map((p): SavedPane | undefined =>
+        p.media
+          ? {
+              file: p.media.file,
+              isVideo: p.media.isVideo,
+              duration: Number.isFinite(p.media.duration)
+                ? p.media.duration
+                : undefined,
+              width: p.media.width,
+              height: p.media.height,
+              thumb: p.media.thumb,
+              trimStart: p.trimStart,
+            }
+          : undefined,
+      );
       slots[slot.id] = {
         kind: "media",
         file: st.media?.file,
@@ -280,6 +342,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         thumb: st.media?.thumb,
         trimStart: st.trimStart,
         soundOn: st.soundOn,
+        ...(paneSaves.some(Boolean) ? { panes: paneSaves } : {}),
       };
     }
     for (const slot of template.tracks.overlay) {
@@ -308,7 +371,17 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         const light: SavedProject = {
           ...project,
           slots: Object.fromEntries(
-            Object.entries(slots).map(([k, v]) => [k, { ...v, file: undefined }]),
+            Object.entries(slots).map(([k, v]) => [
+              k,
+              {
+                ...v,
+                file: undefined,
+                /* pane files are just as heavy — the light save drops them too */
+                panes: v.panes?.map((p) =>
+                  p ? { ...p, file: undefined } : undefined,
+                ),
+              },
+            ]),
           ),
         };
         await saveProject(light);
@@ -345,9 +418,25 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
             media = undefined;
           }
         }
+        const paneStates: PaneState[] | undefined = s?.panes?.length
+          ? await Promise.all(
+              s.panes.map(async (ps): Promise<PaneState> => {
+                if (!ps?.file) return { trimStart: ps?.trimStart ?? 0 };
+                try {
+                  const file = new File([ps.file], ps.file.name ?? "pane", {
+                    type: ps.isVideo ? "video/mp4" : "image/jpeg",
+                  });
+                  return { media: await probeFile(file), trimStart: ps.trimStart };
+                } catch {
+                  return { trimStart: ps.trimStart ?? 0 };
+                }
+              }),
+            )
+          : undefined;
         next[slot.id] = {
           kind: "media",
           media,
+          ...(paneStates ? { panes: paneStates } : {}),
           trimStart: s?.trimStart ?? 0,
           soundOn: s?.soundOn ?? false,
         };
@@ -369,14 +458,24 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
 
   const clearCarryNotice = useCallback(() => setCarryNotice(false), []);
 
-  const filledMedia = useMemo(
+  /* pane-aware fill counts — a collage slot has N honest holes to fill */
+  const filledMedia = useMemo(() => {
+    if (!template) return 0;
+    let n = 0;
+    for (const s of template.tracks.media) {
+      const st = states[s.id];
+      if (st?.media) n += 1;
+      n += (st?.panes ?? []).filter((p) => p.media).length;
+    }
+    return n;
+  }, [template, states]);
+  const totalMedia = useMemo(
     () =>
       template
-        ? template.tracks.media.filter((s) => states[s.id]?.media).length
+        ? template.tracks.media.reduce((n, s) => n + paneCount(s.layout), 0)
         : 0,
-    [template, states],
+    [template],
   );
-  const totalMedia = template?.tracks.media.length ?? 0;
 
   const value: ProjectValue = {
     template,

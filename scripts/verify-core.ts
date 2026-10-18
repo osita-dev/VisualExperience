@@ -58,12 +58,24 @@ import {
   directLook,
   directMotion,
   directSounds,
+  SFX_MAX,
   directTexts,
+  directTextPlacement,
+  placeTexts,
+  textBoxesClash,
+  type TextShape,
   directTransitions,
   shuffledIndices,
   type MediaInfo,
 } from "../src/lib/direct";
 import { detectBeat, pickSegment, songProfile } from "../src/lib/beat";
+import {
+  LAYOUT_GAP,
+  LAYOUTS,
+  layoutRects,
+  paneCount,
+  paneKey,
+} from "../src/core/media/layouts";
 
 let pass = 0;
 let fail = 0;
@@ -100,7 +112,7 @@ check("3 bundles", BUNDLES.length === 3, String(BUNDLES.length));
 check("all presets keyed id@version", Object.keys(PRESET_MAP).length === 6 + 6 + 6 + TEXT_PRESETS.length + VANIM_PRESETS.length + FILTER_PRESETS.length + 3);
 
 /* ---------- 2. Validation V1–V12 on every template ---------- */
-console.log("\n[2] Template validation (V1–V12)");
+console.log("\n[2] Template validation (V1–V13)");
 for (const raw of RAW_TEMPLATES) {
   const { issues } = validateTemplate(raw, PRESET_MAP);
   check(`${raw.id} valid`, issues.length === 0, issues.map((i) => `${i.rule}: ${i.message}`).join("; "));
@@ -1584,24 +1596,41 @@ check("every cut gets a real transition preset",
 check("a full chain never lands on one identical cut",
   new Set(seams.slice(1).map((s) => s.transitionIn)).size > 1);
 
-/* sounds: random, but from the right catalog category */
+/* sounds: sparse (D58) — a few strong moments, the rest silent */
 const sfxById = new Map(SFX_LIBRARY.map((d) => [d.id, d]));
 const fxKey = presetKey(MOTIONS[0].id, MOTIONS[0].version);
 const sndOut = directSounds([
   { ...mkDirSlot(), effect: "none" },
   { ...mkDirSlot(), effect: fxKey },
 ]);
-check("cut sounds come from the Cuts category",
-  sndOut.every((s) => sfxById.get(s.soundCut)?.category === "cuts"));
+check(
+  "a quiet slot's cut sound is honest silence",
+  sndOut.every((s) => s.soundCut === "none" || sfxById.get(s.soundCut)?.category === "cuts"),
+);
 check("transition sounds come from the Transitions category",
-  sndOut.every((s) => sfxById.get(s.soundTransition)?.category === "transitions"));
+  sndOut.every((s) => s.soundTransition === "none" || sfxById.get(s.soundTransition)?.category === "transitions"));
 check("a slot with no effect keeps its effect sound on auto",
   sndOut[0].soundEffect === "auto");
 check(
-  "a slot with an effect gets a Cinematic sound",
-  sndOut[1].soundEffect !== "auto" &&
-    sfxById.get(sndOut[1].soundEffect)?.category === "cinematic",
+  "a slot with an effect never gets a fake Cinematic hit unless it earned one",
+  sndOut[1].soundEffect === "auto" || sfxById.get(sndOut[1].soundEffect)?.category === "cinematic",
 );
+
+/* the sparsity rule itself, on a long edit (D58) */
+const longSnd = directSounds(Array.from({ length: 8 }, () => ({ ...mkDirSlot(), effect: fxKey })));
+const hitsOf = (field: "soundCut" | "soundTransition") =>
+  longSnd.filter((s) => s[field] !== "none").length;
+check("a long edit gets at most 3 cut hits", hitsOf("soundCut") <= SFX_MAX, String(hitsOf("soundCut")));
+check("a long edit gets at most 3 transition hits", hitsOf("soundTransition") <= SFX_MAX, String(hitsOf("soundTransition")));
+check("slot 0 never takes a cut hit (no cut of its own)", longSnd[0].soundCut === "none");
+{
+  const cutIdx = longSnd.map((s, i) => (s.soundCut !== "none" ? i : -1)).filter((i) => i >= 0);
+  let spaced = true;
+  for (let a = 0; a < cutIdx.length; a++)
+    for (let b = a + 1; b < cutIdx.length; b++)
+      if (cutIdx[b] - cutIdx[a] <= 1) spaced = false;
+  check("cut hits are spaced apart, never back-to-back", spaced, cutIdx.join(","));
+}
 
 /* look + motion + texts stay inside the catalogs */
 const filterIds = new Set(FILTER_PRESETS.map((p) => p.id));
@@ -1792,6 +1821,178 @@ check("no profile → honest start at 0",
   pickSegment(null, 40, 10) === 0);
 check("a silent song has no profile",
   songProfile(new Float32Array(segSR), segSR) === null);
+
+/* ---------- 26. Layouts (split screen / collage) ---------- */
+console.log("\n[26] Layouts (composition)");
+
+check("layout catalog pane counts",
+  paneCount("single") === 1 && paneCount("split-h") === 2 &&
+  paneCount("split-v") === 2 && paneCount("collage-3") === 3 &&
+  paneCount("collage-4") === 4 &&
+  LAYOUTS.length === 5);
+check("missing or unknown layout reads as one full-frame pane",
+  paneCount(undefined) === 1 && paneCount("quad") === 1);
+check("pane 0 keeps the slot's own key",
+  paneKey("s3", 0) === "s3" && paneKey("s3", 2) === "s3#2");
+
+for (const lay of ["single", "split-h", "split-v", "collage-3", "collage-4"]) {
+  const rects = layoutRects(lay);
+  const n = paneCount(lay);
+  const inBounds = rects.every(
+    (r) =>
+      r.x >= 0 && r.y >= 0 && r.x + r.w <= 1 + 1e-9 && r.y + r.h <= 1 + 1e-9 &&
+      r.w > 0 && r.h > 0,
+  );
+  check(`${lay}: ${n} rect(s), in bounds, positive`, rects.length === n && inBounds);
+  let overlap = false;
+  for (let a = 0; a < rects.length; a++)
+    for (let b = a + 1; b < rects.length; b++) {
+      const ra = rects[a];
+      const rb = rects[b];
+      if (
+        ra.x < rb.x + rb.w - 1e-9 && rb.x < ra.x + ra.w - 1e-9 &&
+        ra.y < rb.y + rb.h - 1e-9 && rb.y < ra.y + ra.h - 1e-9
+      )
+        overlap = true;
+    }
+  check(`${lay}: panes never overlap`, !overlap);
+  /* the frame is covered: every sample point sits in a pane or in the
+     thin gap between panes (within LAYOUT_GAP of one) */
+  let uncovered = 0;
+  for (let gx = 0; gx <= 20; gx++)
+    for (let gy = 0; gy <= 34; gy++) {
+      const px = gx / 20;
+      const py = gy / 34;
+      const hit = rects.some(
+        (r) =>
+          px >= r.x - LAYOUT_GAP && px <= r.x + r.w + LAYOUT_GAP &&
+          py >= r.y - LAYOUT_GAP && py <= r.y + r.h + LAYOUT_GAP,
+      );
+      if (!hit) uncovered++;
+    }
+  check(`${lay}: frame covered (gap-tolerant)`, uncovered === 0,
+    `${uncovered} uncovered points`);
+}
+
+/* a real template wearing a split layout */
+const layT = {
+  ...mpT,
+  tracks: {
+    ...mpT.tracks,
+    media: mpT.tracks.media.map((s, i) =>
+      i === 0 ? { ...s, layout: "split-h" } : s,
+    ),
+  },
+};
+check("a split-screen slot validates",
+  validateTemplate(layT, PRESET_MAP).issues.length === 0,
+  validateTemplate(layT, PRESET_MAP).issues.map((i) => `${i.rule}:${i.message}`).join("; "));
+const badLay = validateTemplate(
+  {
+    ...mpT,
+    tracks: {
+      ...mpT.tracks,
+      media: mpT.tracks.media.map((s, i) =>
+        i === 0 ? { ...s, layout: "quad" } : s,
+      ),
+    },
+  },
+  PRESET_MAP,
+);
+check("an unknown layout is caught (V13)",
+  badLay.issues.some((i) => i.rule === "V13"),
+  badLay.issues.map((i) => i.rule).join(","));
+
+/* resolve: panes ride the show entry; pane 0's trim is also trimStart */
+const layContent: ResolveContent = {
+  texts: {},
+  trims: { s1: 0.4, "s1#1": 1.2 },
+  soundOn: {},
+};
+const layShow = resolve(layT, layContent, PRESET_MAP).entries.find(
+  (e) => e.kind === "media" && e.do === "show",
+);
+check("split layout rides the show entry with per-pane trims",
+  layShow?.params.layout === "split-h" &&
+  Array.isArray(layShow?.params.panes) &&
+  (layShow?.params.panes as number[]).length === 2 &&
+  (layShow?.params.panes as number[])[0] === 0.4 &&
+  (layShow?.params.panes as number[])[1] === 1.2 &&
+  layShow?.params.trimStart === 0.4,
+  JSON.stringify(layShow?.params));
+const singleShow = resolve(mpT, content, PRESET_MAP).entries.find(
+  (e) => e.kind === "media" && e.do === "show",
+);
+check("a single slot's entry stays lean (no panes)",
+  singleShow?.params.layout === undefined &&
+  singleShow?.params.panes === undefined);
+
+/* ---------- 27. Text placement (D57) ---------- */
+console.log("\n[27] Text placement");
+
+/* a spread of four texts that all share the screen — they must not clash */
+const tShapes: TextShape[] = [
+  { x: 0.5, y: 0.5, w: 0.4, h: 0.05, start: 0, dur: 10 },
+  { x: 0.5, y: 0.5, w: 0.3, h: 0.04, start: 1, dur: 8 },
+  { x: 0.5, y: 0.5, w: 0.35, h: 0.06, start: 2, dur: 6 },
+  { x: 0.5, y: 0.5, w: 0.25, h: 0.03, start: 3, dur: 4 },
+];
+const tPlaced = placeTexts(tShapes);
+check("one position per text, in order",
+  tPlaced.length === tShapes.length &&
+  tPlaced.every((p) => p.x >= 0 && p.x <= 1 && p.y >= 0 && p.y <= 1));
+{
+  let clash = false;
+  for (let a = 0; a < tShapes.length; a++)
+    for (let b = a + 1; b < tShapes.length; b++) {
+      const A = tShapes[a];
+      const B = tShapes[b];
+      const sameTime = A.start < B.start + B.dur && B.start < A.start + A.dur;
+      if (sameTime &&
+          textBoxesClash({ ...tPlaced[a], w: A.w, h: A.h },
+                         { ...tPlaced[b], w: B.w, h: B.h }))
+        clash = true;
+    }
+  check("texts visible together never overlap", !clash);
+}
+check("texts never sit in the top/bottom slivers",
+  tPlaced.every((p, i) =>
+    p.y - tShapes[i].h >= 0.07 && p.y + tShapes[i].h <= 0.92));
+
+/* texts at different times are free to share a spot */
+const tTimed: TextShape[] = [
+  { x: 0.5, y: 0.5, w: 0.4, h: 0.05, start: 0, dur: 2 },
+  { x: 0.5, y: 0.5, w: 0.4, h: 0.05, start: 4, dur: 2 },
+];
+const tTimedP = placeTexts(tTimed);
+check("non-overlapping texts may reuse a spot",
+  tTimedP.every((p) => p.x >= 0 && p.x <= 1));
+
+/* reroll differs (randomness lives here, and only here) */
+const tRe = placeTexts(tShapes);
+check("a reroll can differ (stored once placed)",
+  tRe.length === tShapes.length);
+
+/* the director adds up to the target, keeping existing wording */
+type TSeed = { start: number; dur: number; value: string };
+const seedText = (s: TSeed) => ({ ...s, look: "center" });
+const tDirect = directTextPlacement(
+  [{ x: 0.5, y: 0.76, w: 0.4, h: 0.05, start: 0, dur: 10, value: "MY TITLE" }],
+  10,
+  seedText,
+);
+check("a lone text grows to the 3–4 target with placeholder copy",
+  tDirect.texts.length >= 3 && tDirect.texts.length <= 4);
+check("the original text keeps its own words",
+  tDirect.texts[0].value === "MY TITLE");
+check("added texts get honest placeholder copy, not fake lines",
+  tDirect.texts.slice(1).every((t) => t.value.length > 0));
+check("added texts stay inside the video's window",
+  tDirect.texts.every((t) => t.start >= 0 && t.start + t.dur <= 10 + 1e-9));
+check("the target can never exceed the cap",
+  directTextPlacement([], 10, seedText, 99).texts.length <= 4);
+check("added texts carry the caller's authored fields",
+  tDirect.texts.slice(1).every((t) => t.look === "center"));
 
 /* ---------- summary ---------- */
 console.log(`\n${"=".repeat(46)}\n  ${pass} passed, ${fail} failed\n${"=".repeat(46)}`);

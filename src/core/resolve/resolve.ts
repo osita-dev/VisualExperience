@@ -23,6 +23,7 @@ import type {
   Template,
 } from "../model/types";
 import { isBundle, isLocalTrack, presetKey } from "../model/types";
+import { paneCount, paneKey } from "../media/layouts";
 
 type PresetMap = Record<string, Preset>;
 
@@ -324,6 +325,15 @@ export function resolve(
       slot.filter === undefined ? template.look ?? null : slot.filter;
     const filter = filterRef ? concreteFilter(filterRef, presets) : null;
 
+    /* Composition (D56): a split/collage slot carries its panes' trims —
+       pane 0's trim is also the plain `trimStart` (the primary pane) */
+    const paneN = paneCount(slot.layout);
+    const paneTrims = Array.from({ length: paneN }, (_, p) =>
+      p === 0
+        ? (content.trims[slot.id] ?? 0)
+        : (content.trims[paneKey(slot.id, p)] ?? content.trims[slot.id] ?? 0),
+    );
+
     entries.push({
       t: t0,
       dur: t1 - t0,
@@ -336,6 +346,9 @@ export function resolve(
         trimStart: content.trims[slot.id] ?? 0,
         shortClip: slot.shortClip ?? "freeze",
         ...(filter ? { filter } : {}),
+        ...(paneN > 1
+          ? { layout: slot.layout ?? "single", panes: paneTrims }
+          : {}),
       },
     });
     entries.push({

@@ -1,5 +1,5 @@
 /**
- * Template validation — V1…V11 (Rule 11). Computed, never faked.
+ * Template validation — V1…V13 (Rule 11). Computed, never faked.
  * Hand-rolled so the entire core stays dependency-free and testable
  * without node_modules. Returns structured issues; never throws.
  */
@@ -18,6 +18,7 @@ import { migrateTemplate } from "../model/migrate";
 import { SFX_ASSETS } from "../audio/sfxCatalog";
 import { getTone } from "../audio/tones";
 import { STICKER_ASSETS } from "../media/stickers";
+import { layoutById } from "../media/layouts";
 import { FONT_FACES } from "../text/fonts";
 
 export interface ValidationIssue {
@@ -99,6 +100,13 @@ function checkMediaChain(t: Template, issues: ValidationIssue[]): void {
     }
     if (slot.accepts.length === 0)
       push(issues, "V2", `Slot "${slot.id}" must accept photo or video`);
+    /* Composition (D56): a layout, when worn, must be a known one */
+    if (slot.layout !== undefined && layoutById(slot.layout) === undefined)
+      push(
+        issues,
+        "V13",
+        `Slot "${slot.id}" references unknown layout "${String(slot.layout)}"`,
+      );
     if (i > 0) {
       const prev = media[i - 1];
       if (slot.id === prev.id)
@@ -447,7 +455,7 @@ export function validateTemplate(
     seen.add(s.id);
   }
 
-  if (issues.some((i) => ["shape", "V2", "V3", "V4", "V5", "V7", "V8", "V9", "V10", "V11", "V12"].includes(i.rule)))
+  if (issues.some((i) => ["shape", "V2", "V3", "V4", "V5", "V7", "V8", "V9", "V10", "V11", "V12", "V13"].includes(i.rule)))
     return { issues };
 
   return { template: t, issues };
