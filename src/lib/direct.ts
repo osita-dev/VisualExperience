@@ -31,7 +31,12 @@
  * data that renders deterministically afterwards (preview ≡ export).
  */
 
-import { MAX_TOTAL_SEC, MIN_SLOT_SEC, presetKey } from "@/core/model/types";
+import {
+  DEFAULT_SLOT_SEC,
+  MAX_TOTAL_SEC,
+  MIN_SLOT_SEC,
+  presetKey,
+} from "@/core/model/types";
 import { SFX_LIBRARY } from "@/core/audio/sfxCatalog";
 import {
   EFFECTS,
@@ -140,6 +145,70 @@ const pick = <T>(arr: readonly T[]): T => arr[rndInt(arr.length)];
 /** random on a grid: stepRnd(1, 3, 0.5) → 1, 1.5 … 3 */
 const stepRnd = (min: number, max: number, step: number): number =>
   min + rndInt(Math.round((max - min) / step) + 1) * step;
+
+/* ------------------------------------------------------------------ *
+ * bulk upload sizing (D60) — every picked file must land
+ * ------------------------------------------------------------------ */
+
+/**
+ * Size the slots for a multi-upload so EVERY picked file lands inside
+ * MAX_TOTAL_SEC (never "the first files eat the budget"). Each file
+ * gets an equal share of the room: a photo never longer than the
+ * default slot, a video never longer than its own clip, nothing under
+ * the 1s floor. The director re-picks punchy lengths right after — this
+ * pass is the guarantee that the budget CONTAINS the batch.
+ *
+ * `fixedSec` = the seconds the chain keeps outside this batch (slots
+ * that already have media, plus empties that will keep their length).
+ *
+ * Only when the chain is already so full that even the 1s floor can't
+ * fit every file does the TAIL get dropped — a file is left out only
+ * because the math leaves no room, never because an earlier file was
+ * greedy. `skipped` says how many, honestly.
+ */
+export function fitBulkDurs(
+  items: readonly MediaInfo[],
+  fixedSec: number,
+  opts?: { photoCap?: number },
+): { durs: number[]; skipped: number } {
+  const photoCap = opts?.photoCap ?? DEFAULT_SLOT_SEC;
+  const n = items.length;
+  if (n === 0) return { durs: [], skipped: 0 };
+
+  const room = Math.max(0, MAX_TOTAL_SEC - fixedSec);
+  /* the fair share, on the 0.1s grid, never below the 1s floor */
+  const share = Math.max(MIN_SLOT_SEC, Math.floor((room / n) * 10) / 10);
+  const durs = items.map((m) =>
+    m.isVideo
+      ? /* a window never outlives its clip; a clip shorter than the
+         * window plays in full (floor still applies) */
+        Math.max(MIN_SLOT_SEC, Math.min(m.duration, share))
+      : Math.min(photoCap, share),
+  );
+
+  let total = fixedSec + durs.reduce((a, b) => a + b, 0);
+  let skipped = 0;
+  /* rounding or sub-floor shares can still overrun: shrink OUR slots
+     longest-first; only when everything sits at the floor does the
+     tail get honestly dropped */
+  while (total > MAX_TOTAL_SEC + 1e-9 && durs.length > 0) {
+    let idx = -1;
+    for (let i = 0; i < durs.length; i++)
+      if (durs[i] > MIN_SLOT_SEC + 1e-9 && (idx === -1 || durs[i] > durs[idx]))
+        idx = i;
+    if (idx >= 0) {
+      const take = Math.min(total - MAX_TOTAL_SEC, durs[idx] - MIN_SLOT_SEC);
+      durs[idx] = Math.round((durs[idx] - take) * 10) / 10;
+      total -= take;
+    } else {
+      /* every slot at the floor and it still doesn't fit — drop the
+         last file (and keep dropping) rather than break the cap */
+      total -= durs.pop() ?? 0;
+      skipped++;
+    }
+  }
+  return { durs, skipped };
+}
 
 /* ------------------------------------------------------------------ *
  * durations — punchy photos, video windows at a random stored start

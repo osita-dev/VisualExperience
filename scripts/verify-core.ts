@@ -65,6 +65,7 @@ import {
   textBoxesClash,
   type TextShape,
   directTransitions,
+  fitBulkDurs,
   shuffledIndices,
   type MediaInfo,
 } from "../src/lib/direct";
@@ -1993,6 +1994,48 @@ check("the target can never exceed the cap",
   directTextPlacement([], 10, seedText, 99).texts.length <= 4);
 check("added texts carry the caller's authored fields",
   tDirect.texts.slice(1).every((t) => t.look === "center"));
+
+/* ---------- 28. Bulk upload fit — every picked file must land (D60) ---------- */
+console.log("\n[28] Bulk upload fit");
+const bulkPhoto50 = Array.from({ length: 50 }, () => ({
+  isVideo: false,
+  duration: 0,
+}));
+const fit50 = fitBulkDurs(bulkPhoto50, 0);
+check("50 photos into an empty chain: none skipped",
+  fit50.skipped === 0 && fit50.durs.length === 50);
+check("every photo slot ≥ the 1s floor and ≤ the default slot",
+  fit50.durs.every((d) => d >= 1 && d <= 10));
+check("the whole batch fits the 300s cap",
+  fit50.durs.reduce((a, b) => a + b, 0) <= MAX_TOTAL_SEC + 1e-9);
+check("the share is even — no first file eats the budget",
+  fit50.durs.every((d) => d === fit50.durs[0]));
+
+const bulkVid50 = Array.from({ length: 50 }, () => ({
+  isVideo: true,
+  duration: 7,
+}));
+const fitVid = fitBulkDurs(bulkVid50, 0);
+check("50 videos: none skipped",
+  fitVid.skipped === 0 && fitVid.durs.length === 50);
+check("a video slot never outlives its own clip",
+  fitVid.durs.every((d) => d <= 7 + 1e-9));
+check("video batch fits the cap",
+  fitVid.durs.reduce((a, b) => a + b, 0) <= MAX_TOTAL_SEC + 1e-9);
+
+/* an already-nearly-full chain: even the 1s floor can't fit 50 files —
+   the tail is dropped honestly, never a greedy mid-batch cut */
+const fitFull = fitBulkDurs(bulkPhoto50, MAX_TOTAL_SEC - 5);
+check("a full chain keeps only what the floor allows — the rest is reported",
+  fitFull.skipped === 45 && fitFull.durs.length === 5,
+  `${fitFull.skipped} skipped / ${fitFull.durs.length} kept`);
+check("even then the cap holds",
+  fitFull.durs.reduce((a, b) => a + b, 0) + (MAX_TOTAL_SEC - 5) <=
+    MAX_TOTAL_SEC + 1e-9);
+check("the kept ones sit at the honest floor",
+  fitFull.durs.every((d) => d === 1));
+check("an empty batch is a no-op",
+  fitBulkDurs([], 120).durs.length === 0 && fitBulkDurs([], 120).skipped === 0);
 
 /* ---------- summary ---------- */
 console.log(`\n${"=".repeat(46)}\n  ${pass} passed, ${fail} failed\n${"=".repeat(46)}`);

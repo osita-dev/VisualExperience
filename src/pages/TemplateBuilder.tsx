@@ -143,6 +143,7 @@ import {
   directTextPlacement,
   type TextShape,
   directTransitions,
+  fitBulkDurs,
   shuffledIndices,
   type MediaInfo,
   type Pacing,
@@ -1619,10 +1620,12 @@ const TemplateBuilder = () => {
   /* -------- multi-upload (up to 50) — the gallery-style path --------
      One tap opens the phone's own picker with multi-select (TikTok
      style); every chosen photo/video lands in the chain in order:
-     empty slots first, then new slots sized by the same honest rules
-     as the workbench (video → its clip length, photo → the default
-     slot), everything clamped into the total budget — files that don't
-     fit the 300s cap are honestly reported as skipped. One undo step. */
+     empty slots first, then new ones — with EVERY length computed from
+     the whole budget up front (an equal share of the room: photo ≤ the
+     default slot, video ≤ its own clip, D60), so all files fit the
+     300s cap instead of the first files eating it. A file is skipped
+     only when even the 1s floor can't fit it — and then it's honestly
+     reported. One undo step. */
   const bulkInputRef = useRef<HTMLInputElement>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
 
@@ -1652,26 +1655,44 @@ const TemplateBuilder = () => {
         const nextSlots = [...baseSlots];
         const claimed = new Set<number>();
         const hasMedia = (i: number) => testMedia[`s${i + 1}`] !== undefined;
-        const room = () =>
-          MAX_TOTAL_SEC - nextSlots.reduce((a, s) => a + s.dur, 0);
+        const chainSec = baseSlots.reduce((a, s) => a + s.dur, 0);
+        /* the empty slots this batch can claim, in chain order */
+        const emptyIdxs: number[] = [];
+        for (let i = 0; i < baseSlots.length; i++)
+          if (!hasMedia(i)) emptyIdxs.push(i);
         const mediaAdd: Record<string, ProbedMedia> = {};
         let firstUid: string | null = null;
         let added = 0;
-        let skipped = 0;
 
-        for (const m of probed) {
-          let idx = nextSlots.findIndex(
-            (_, i) => i < baseSlots.length && !hasMedia(i) && !claimed.has(i),
+        /* D60: size EVERY file from the whole budget up front — an equal
+           share of the room — so nothing is dropped because an earlier
+           file ate the cap. fixedSec = what the chain keeps outside the
+           empties this batch rewrites (slots with media + any empties
+           the batch won't reach). A file is left out only when even the
+           1s floor can't fit it — and then it's honestly reported. */
+        const fixedWith = (fillE: number) =>
+          chainSec -
+          emptyIdxs.slice(0, fillE).reduce((a, i) => a + baseSlots[i].dur, 0);
+        let fit = fitBulkDurs(
+          probed,
+          fixedWith(Math.min(emptyIdxs.length, probed.length)),
+        );
+        if (fit.skipped > 0) {
+          /* left-out files free the empties they would have taken — give
+             that budget back and settle on the final fit */
+          const landed0 = probed.length - fit.skipped;
+          fit = fitBulkDurs(
+            probed.slice(0, landed0),
+            fixedWith(Math.min(emptyIdxs.length, landed0)),
           );
+        }
+        const skipped = fit.skipped;
+        const landed = probed.slice(0, probed.length - skipped);
+
+        landed.forEach((m, k) => {
+          let idx = k < emptyIdxs.length ? emptyIdxs[k] : -1;
+          const dur = fit.durs[k] ?? DEFAULT_SLOT_SEC;
           if (idx === -1) {
-            /* no empty slot — append one if the budget allows */
-            if (room() < MIN_SLOT_SEC) {
-              skipped++;
-              continue;
-            }
-            const dur = m.isVideo
-              ? Math.min(Math.max(MIN_SLOT_SEC, m.duration), room())
-              : Math.min(DEFAULT_SLOT_SEC, room());
             nextSlots.push({
               uid: newUid(),
               dur,
@@ -1686,23 +1707,14 @@ const TemplateBuilder = () => {
               soundTransition: SOUND_AUTO,
             });
             idx = nextSlots.length - 1;
-          } else if (m.isVideo) {
-            /* a fresh clip takes its own length, budget-capped (D49) */
-            const others = nextSlots.reduce(
-              (a, s, i) => (i === idx ? a : a + s.dur),
-              0,
-            );
-            const cap = Math.max(MIN_SLOT_SEC, MAX_TOTAL_SEC - others);
-            nextSlots[idx] = {
-              ...nextSlots[idx],
-              dur: Math.min(Math.max(MIN_SLOT_SEC, m.duration), cap),
-            };
+          } else {
+            nextSlots[idx] = { ...nextSlots[idx], dur };
           }
           claimed.add(idx);
           mediaAdd[`s${idx + 1}`] = m;
           if (firstUid === null) firstUid = nextSlots[idx].uid;
           added++;
-        }
+        });
 
         if (added === 0) {
           toast(`Nothing fit — the ${MAX_TOTAL_SEC}s budget is full.`);
@@ -1782,8 +1794,8 @@ const TemplateBuilder = () => {
         if (firstUid) setSelectedSlot(firstUid);
         toast.success(
           skipped > 0
-            ? `Added ${added} — ${skipped} skipped, the ${MAX_TOTAL_SEC}s budget is full.`
-            : `Added ${added} — auto-directed. Shuffle to re-roll.`,
+            ? `Added ${added} of ${probed.length} — the ${MAX_TOTAL_SEC}s budget is full; shorten a slot to add the rest.`
+            : `Added ${added} — every file fit the ${MAX_TOTAL_SEC}s budget. Auto-directed.`,
         );
       } finally {
         setBulkBusy(false);
