@@ -7,6 +7,9 @@
 export interface SavedPane {
   /** the actual File — structured-clone stored so reopen restores media */
   file?: Blob & { name?: string };
+  /** the file's REAL name + type (D61) — restore never has to guess */
+  name?: string;
+  mime?: string;
   isVideo?: boolean;
   duration?: number;
   width?: number;
@@ -19,6 +22,9 @@ export interface SavedSlot {
   kind: "media" | "text";
   /** the actual File — structured-clone stored so reopen restores media */
   file?: Blob & { name?: string };
+  /** the file's REAL name + type (D61) — restore never has to guess */
+  name?: string;
+  mime?: string;
   isVideo?: boolean;
   duration?: number;
   width?: number;

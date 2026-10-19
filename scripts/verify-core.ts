@@ -33,7 +33,8 @@ import {
 } from "../src/core/text/fonts";
 import { synthSfx, synthTone } from "../src/player/synth";
 import { timelineStarts, trimAtBoundary } from "../src/lib/timeline";
-import { maxTrimStart, type ProbedMedia } from "../src/lib/mediaUtils";
+import { maxTrimStart, storedFileMime, rebuildStoredFile, isUniversalVideo, type ProbedMedia } from "../src/lib/mediaUtils";
+import { filledMediaTemplate } from "../src/core/media/filled";
 import {
   OUT_NAME,
   convertArgs,
@@ -2036,6 +2037,68 @@ check("the kept ones sit at the honest floor",
   fitFull.durs.every((d) => d === 1));
 check("an empty batch is a no-op",
   fitBulkDurs([], 120).durs.length === 0 && fitBulkDurs([], 120).skipped === 0);
+
+/* ---------- 29. D61 — empty slots never pad the chain + honest file identity ---------- */
+console.log("\n[29] Content-only chain & honest restore (D61)");
+const d61T = get("tpl.mini_punch");
+const d61Ids = d61T.tracks.media.map((s) => s.id);
+const onlyFirst = filledMediaTemplate(d61T, (id) => id === d61Ids[0]);
+check("a partly-filled template drops every empty slot",
+  onlyFirst.tracks.media.length === 1 && onlyFirst.tracks.media[0].id === d61Ids[0],
+  `${onlyFirst.tracks.media.length} kept`);
+check("the kept slot keeps its own duration",
+  onlyFirst.tracks.media[0].dur === d61T.tracks.media[0].dur);
+check("dropping slots shortens the chain to the real content",
+  resolve(onlyFirst, { texts: {}, trims: {}, soundOn: {} }, PRESET_MAP).duration ===
+    d61T.tracks.media[0].dur);
+check("an all-empty template keeps its skeleton (library preview)",
+  filledMediaTemplate(d61T, () => false) === d61T);
+check("an all-filled template is untouched",
+  filledMediaTemplate(d61T, () => true) === d61T);
+check("the original template is never mutated",
+  d61T.tracks.media.length === d61Ids.length);
+check("connections to dropped slots never break resolve",
+  (() => {
+    try {
+      resolve(onlyFirst, { texts: {}, trims: {}, soundOn: {} }, PRESET_MAP);
+      return true;
+    } catch {
+      return false;
+    }
+  })());
+
+/* honest file identity — restore never guesses a type */
+check("saved mime wins over everything",
+  storedFileMime("video/webm", "video/mp4", "x.mov") === "video/webm");
+check("the blob's own type is the second source",
+  storedFileMime(undefined, "image/png", "x") === "image/png");
+check("extension guess only when both are empty",
+  storedFileMime(undefined, "", "clip.MOV") === "video/quicktime" &&
+    storedFileMime(undefined, "", "a.mp4") === "video/mp4" &&
+    storedFileMime(undefined, "", "p.jpeg") === "image/jpeg");
+check("truly unknown files stay honestly unknown",
+  storedFileMime(undefined, "", "mystery") === "application/octet-stream");
+const d61File = new File([new Uint8Array([1, 2, 3])], "real.webm", {
+  type: "video/webm",
+});
+check("a stored File keeps its real identity untouched",
+  rebuildStoredFile(d61File, "lied.mp4", "video/mp4") === d61File);
+const rebuilt = rebuildStoredFile(
+  new Blob([new Uint8Array([1])]),
+  "clip.webm",
+  "video/webm",
+);
+check("a stored Blob is rebuilt with its REAL name and type",
+  rebuilt.name === "clip.webm" && rebuilt.type === "video/webm",
+  `${rebuilt.name}/${rebuilt.type}`);
+
+/* a video that can't be proven universal must be prepared on-device */
+check("garbage bytes are never treated as a universal video",
+  await isUniversalVideo(
+    new File([new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7])], "fake.mp4", {
+      type: "video/mp4",
+    }),
+  ) === false);
 
 /* ---------- summary ---------- */
 console.log(`\n${"=".repeat(46)}\n  ${pass} passed, ${fail} failed\n${"=".repeat(46)}`);

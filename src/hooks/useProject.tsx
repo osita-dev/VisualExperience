@@ -23,10 +23,11 @@ import type {
   UserAction,
 } from "@/core/model/types";
 import { resolve } from "@/core/resolve/resolve";
+import { filledMediaTemplate } from "@/core/media/filled";
 import { PRESET_MAP } from "@/presets/data";
 import { paneCount, paneKey } from "@/core/media/layouts";
 import type { Bindings, MediaBinding } from "@/player/frame";
-import { probeFile, type ProbedMedia } from "@/lib/mediaUtils";
+import { probeFile, rebuildStoredFile, ingestFile, type ProbedMedia } from "@/lib/mediaUtils";
 import {
   disposeMediaBinding,
   makeMediaBinding,
@@ -161,10 +162,19 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     return { texts, trims, soundOn };
   }, [states]);
 
-  const schedule: Schedule | null = useMemo(
-    () => (template ? resolve(template, content, PRESET_MAP) : null),
-    [template, content],
-  );
+  /* D61: the chain carries ONLY real content — slots without media
+     never render, export or pad the timeline. When NOTHING is filled
+     yet (the template-preview state in the library), the full skeleton
+     stays so the viewer still sees the template's shape. */
+  const schedule: Schedule | null = useMemo(() => {
+    if (!template) return null;
+    const hasMedia = (id: string): boolean => {
+      const st = states[id];
+      if (st?.media) return true;
+      return (st?.panes ?? []).some((p) => p.media);
+    };
+    return resolve(filledMediaTemplate(template, hasMedia), content, PRESET_MAP);
+  }, [template, content, states]);
 
   /* -------- imported music (D40): decode + register before any playback -------- */
   useEffect(() => {
@@ -320,6 +330,8 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         p.media
           ? {
               file: p.media.file,
+              name: p.media.file.name,
+              mime: p.media.file.type,
               isVideo: p.media.isVideo,
               duration: Number.isFinite(p.media.duration)
                 ? p.media.duration
@@ -334,6 +346,8 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       slots[slot.id] = {
         kind: "media",
         file: st.media?.file,
+        name: st.media?.file.name,
+        mime: st.media?.file.type,
         isVideo: st.media?.isVideo,
         duration:
           st.media && Number.isFinite(st.media.duration) ? st.media.duration : undefined,
@@ -405,31 +419,39 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       projectIdRef.current = saved.id;
 
       const next: Record<string, SlotState> = {};
+      /* D61: a saved file that the browser can no longer decode is
+         RESCUED on-device (converted) instead of silently dropped —
+         only a genuinely unreadable file leaves its slot empty. */
+      const revive = async (
+        blob: Blob & { name?: string },
+        name: string | undefined,
+        mime: string | undefined,
+      ): Promise<ProbedMedia | undefined> => {
+        const file = rebuildStoredFile(blob, name, mime);
+        try {
+          return await probeFile(file);
+        } catch {
+          try {
+            return await ingestFile(file);
+          } catch {
+            return undefined;
+          }
+        }
+      };
       for (const slot of t.tracks.media) {
         const s = saved.slots[slot.id];
         let media: ProbedMedia | undefined;
         if (s?.file) {
-          try {
-            const file = new File([s.file], s.file.name ?? "media", {
-              type: s.isVideo ? "video/mp4" : "image/jpeg",
-            });
-            media = await probeFile(file);
-          } catch {
-            media = undefined;
-          }
+          media = await revive(s.file, s.name, s.mime);
         }
         const paneStates: PaneState[] | undefined = s?.panes?.length
           ? await Promise.all(
               s.panes.map(async (ps): Promise<PaneState> => {
                 if (!ps?.file) return { trimStart: ps?.trimStart ?? 0 };
-                try {
-                  const file = new File([ps.file], ps.file.name ?? "pane", {
-                    type: ps.isVideo ? "video/mp4" : "image/jpeg",
-                  });
-                  return { media: await probeFile(file), trimStart: ps.trimStart };
-                } catch {
-                  return { trimStart: ps.trimStart ?? 0 };
-                }
+                return {
+                  media: await revive(ps.file, ps.name, ps.mime),
+                  trimStart: ps.trimStart,
+                };
               }),
             )
           : undefined;

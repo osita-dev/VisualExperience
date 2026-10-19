@@ -13,6 +13,9 @@ import { runTx } from "@/hooks/useDB";
 /** One picked test-media file + the probed facts worth keeping across reloads. */
 export interface StoredMedia {
   file: Blob;
+  /** the file's REAL name + type (D61) — restore never has to guess */
+  name?: string;
+  mime?: string;
   isVideo: boolean;
   duration: number;
   width: number;

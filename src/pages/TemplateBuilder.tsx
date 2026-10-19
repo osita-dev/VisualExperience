@@ -129,7 +129,7 @@ import {
 import { TEXT_EXITS, TEXT_FAMILIES } from "@/presets/textCatalog";
 import { fmtSec } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { probeFile } from "@/lib/mediaUtils";
+import { probeFile, rebuildStoredFile, ingestFile } from "@/lib/mediaUtils";
 import type { ProbedMedia } from "@/lib/mediaUtils";
 import {
   RAMP_END_SEC,
@@ -1052,6 +1052,8 @@ const MAX_UNDO = 60;
 function toStoredMedia(m: ProbedMedia): StoredMedia {
   return {
     file: m.file,
+    name: m.file.name,
+    mime: m.file.type,
     isVideo: m.isVideo,
     duration: m.duration,
     width: m.width,
@@ -1086,17 +1088,17 @@ async function restoreSnapshot(key: string, base: Snap): Promise<Snap> {
   if (!saved) return base;
   const testMedia: Record<string, ProbedMedia> = {};
   for (const [slotId, m] of Object.entries(saved.testMedia ?? {})) {
+    /* D61: rebuild with the file's REAL name/type, and rescue an
+       undecodable clip on-device instead of dropping it silently. */
+    const file = rebuildStoredFile(m.file, m.name, m.mime);
     try {
-      const blob = m.file;
-      const file =
-        blob instanceof File
-          ? blob
-          : new File([blob], "media", {
-              type: m.isVideo ? "video/mp4" : "image/jpeg",
-            });
       testMedia[slotId] = await probeFile(file);
     } catch {
-      /* an unreadable file is dropped honestly rather than faked */
+      try {
+        testMedia[slotId] = await ingestFile(file);
+      } catch {
+        /* genuinely unreadable — the slot stays honestly empty */
+      }
     }
   }
   return { draft: saved.draft, testMedia, testTrims: saved.testTrims ?? {} };

@@ -110,8 +110,12 @@ const SlotFiller = () => {
 
   const schedule = project.schedule;
   const m = metrics(template);
+  /* D61: empty slots aren't in the (content-only) schedule — fall back to
+     the template's own numbers so their cards stay honest before filling */
   const slotDur = (slotId: string): number =>
-    schedule.slots.find((s) => s.id === slotId)?.dur ?? 0;
+    schedule.slots.find((s) => s.id === slotId)?.dur ??
+    template.tracks.media.find((s) => s.id === slotId)?.dur ??
+    0;
 
   const mediaSlot = template.tracks.media.find((s) => s.id === selected) ?? null;
   const textSlot = template.tracks.overlay.find((s) => s.id === selected) ?? null;
@@ -236,7 +240,9 @@ const SlotFiller = () => {
               {template.title}
             </h1>
             <p className="text-[11px] text-muted-foreground tabular-nums">
-              {fmtSec(m.duration)} · {project.filledMedia}/{project.totalMedia} media ·{" "}
+              {/* D61: the schedule is the REAL chain — its duration is what
+                  actually exports, so empty slots never inflate this number */}
+              {fmtSec(schedule.duration)} · {project.filledMedia}/{project.totalMedia} media ·{" "}
               {m.textSlots} text
             </p>
           </div>
@@ -301,7 +307,10 @@ const SlotFiller = () => {
               return (
                 <SlotCard
                   key={slot.id}
-                  index={schedule.slots.find((s) => s.id === slot.id)?.index ?? 0}
+                  index={
+                    schedule.slots.find((s) => s.id === slot.id)?.index ??
+                    template.tracks.media.findIndex((s) => s.id === slot.id)
+                  }
                   kind={
                     slot.accepts.length === 2
                       ? "both"
@@ -585,7 +594,9 @@ const SlotFiller = () => {
               <p className="pb-2 text-center text-xs text-muted-foreground">
                 {project.totalMedia - project.filledMedia} slot
                 {project.totalMedia - project.filledMedia > 1 ? "s" : ""} still empty —
-                placeholders will appear in the export.
+                {project.filledMedia === 0
+                  ? " add photos or videos to build your video."
+                  : " they'll be left out of the video."}
               </p>
             ) : null}
           </div>

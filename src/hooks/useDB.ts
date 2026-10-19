@@ -8,6 +8,20 @@
 const DB_NAME = "frame-db";
 const DB_VERSION = 5;
 
+/* D61: videos live in IndexedDB and can be large — ask the browser to
+   make our storage PERSISTENT so it never silently evicts projects under
+   disk pressure. Best-effort: browsers may still decline. */
+let persistAsked = false;
+function askPersistence(): void {
+  if (persistAsked) return;
+  persistAsked = true;
+  try {
+    void navigator.storage?.persist?.();
+  } catch {
+    /* unsupported browser — nothing to do */
+  }
+}
+
 export function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
@@ -29,7 +43,10 @@ export function openDb(): Promise<IDBDatabase> {
         db.createObjectStore("drafts", { keyPath: "id" });
       }
     };
-    req.onsuccess = () => resolve(req.result);
+    req.onsuccess = () => {
+      askPersistence();
+      resolve(req.result);
+    };
     req.onerror = () => reject(req.error ?? new Error("Couldn't open storage."));
   });
 }

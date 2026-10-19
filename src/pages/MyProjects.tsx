@@ -20,6 +20,9 @@ import { fmtSec } from "@/lib/format";
 /** My Projects — resume saved work from IndexedDB. */
 const MyProjects = () => {
   const [items, setItems] = useState<SavedProject[] | null>(null);
+  /* D61: opening may run an on-device rescue conversion — say so instead
+     of looking frozen */
+  const [opening, setOpening] = useState<string | null>(null);
   const project = useProject();
   const navigate = useNavigate();
 
@@ -33,9 +36,15 @@ const MyProjects = () => {
   }, [refresh]);
 
   const open = async (p: SavedProject) => {
-    const ok = await project.restore(p);
-    if (ok) navigate(`/t/${p.templateId}/fill`);
-    else toast.error("That template is no longer available.");
+    if (opening) return;
+    setOpening(p.id);
+    try {
+      const ok = await project.restore(p);
+      if (ok) navigate(`/t/${p.templateId}/fill`);
+      else toast.error("That template is no longer available.");
+    } finally {
+      setOpening(null);
+    }
   };
 
   return (
@@ -94,11 +103,12 @@ const MyProjects = () => {
                   </div>
                   <button
                     type="button"
-                    className="min-w-0 flex-1 text-left"
+                    className="min-w-0 flex-1 text-left disabled:opacity-60"
+                    disabled={opening !== null}
                     onClick={() => void open(p)}
                   >
                     <div className="truncate text-sm font-semibold text-foreground">
-                      {p.name}
+                      {opening === p.id ? "Opening…" : p.name}
                     </div>
                     <div className="flex items-center gap-2 text-[11px] text-muted-foreground tabular-nums">
                       {m ? <span>{fmtSec(m.duration)}</span> : null}

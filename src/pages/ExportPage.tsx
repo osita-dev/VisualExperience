@@ -120,7 +120,9 @@ const ExportPage = () => {
                   <div className="flex items-center gap-2 rounded-lg border border-primary/40 bg-primary/10 px-3 py-2 text-xs text-foreground">
                     <AlertTriangle className="h-3.5 w-3.5 text-primary" />
                     {missing} slot{missing > 1 ? "s" : ""} still empty —
-                    placeholder patterns will appear there.
+                    {missing === project.totalMedia
+                      ? " add photos or videos to build your video."
+                      : " they'll be left out of the export."}
                   </div>
                 ) : null}
 
