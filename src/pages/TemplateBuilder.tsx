@@ -318,8 +318,8 @@ interface Draft {
   description: string;
   categories: string[];
   palette: { from: string; to: string; emoji: string };
-  /** show the palette gradient behind empty slots (default off = flat dark) */
-  showBackground: boolean;
+  /** plain plate behind empty slots — "black" (default) or "white" */
+  background: "black" | "white";
   /** "none" | `tone:<id>` | `local:<fileId>` — the soundtrack, never a clock */
   track: string;
   /** imported song meta — set exactly when `track` is a local file (D40) */
@@ -561,8 +561,6 @@ function SoundPicker({
   );
 }
 
-const EMOJI_OPTIONS = ["✨", "🌅", "🔥", "🎧", "🍜", "🪩", "🌃", "🍋", "🎬", "🚀"];
-
 const CATEGORY_SUGGESTIONS = [
   "Trending",
   "Fast Cuts",
@@ -800,7 +798,7 @@ function draftToTemplate(d: Draft, id: string): Template {
     description: d.description.trim(),
     categories: d.categories,
     palette: d.palette,
-    showBackground: d.showBackground,
+    background: d.background,
     canvas: { ratio: "9:16", fps: 30, width: 1080, height: 1920 },
     music: {
       track: d.track,
@@ -912,7 +910,7 @@ function draftFromTemplate(t: Template): Draft {
     description: t.description,
     categories: [...t.categories],
     palette: { ...t.palette },
-    showBackground: t.showBackground ?? false,
+    background: t.background === "white" ? "white" : "black",
     track: isToneTrack(t.music.track)
       ? t.music.track
       : local
@@ -983,7 +981,7 @@ function defaultDraft(): Draft {
     description: "",
     categories: [],
     palette: { from: "#8B5CF6", to: "#06B6D4", emoji: "✨" },
-    showBackground: false,
+    background: "black",
     track: NO_MUSIC_TRACK,
     local: null,
     musicVolume: 0.9,
@@ -1101,7 +1099,13 @@ async function restoreSnapshot(key: string, base: Snap): Promise<Snap> {
       }
     }
   }
-  return { draft: saved.draft, testMedia, testTrims: saved.testTrims ?? {} };
+  /* pre-existing drafts predate the plain-plate field (or carried a
+     gradient flag) — normalize so the plate is always one of the two */
+  const draft: Draft = {
+    ...saved.draft,
+    background: saved.draft.background === "white" ? "white" : "black",
+  };
+  return { draft, testMedia, testTrims: saved.testTrims ?? {} };
 }
 
 /* ------------------------------------------------------------------ *
@@ -4118,45 +4122,29 @@ const TemplateBuilder = () => {
                     })}
                   </div>
                 </Field>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <Field label="Emoji">
-                    <Select
-                      value={draft.palette.emoji}
-                      onValueChange={(v) =>
-                        setDraft((d) => ({
-                          ...d,
-                          palette: { ...d.palette, emoji: v },
-                        }))
-                      }
-                    >
-                      <SelectTrigger className="h-9">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {EMOJI_OPTIONS.map((e) => (
-                          <SelectItem key={e} value={e}>
-                            {e}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </Field>
-                  <Field label="Background">
-                    {/* off by default — empty slots show a flat dark plate */}
-                    <div className="flex items-center gap-2">
-                      <Switch
-                        checked={draft.showBackground}
-                        onCheckedChange={(v) =>
-                          setDraft((d) => ({ ...d, showBackground: v }))
-                        }
-                        aria-label="Show gradient background"
-                      />
-                      <span className="text-xs text-muted-foreground">
-                        {draft.showBackground ? "Gradient shown" : "Hidden"}
-                      </span>
-                    </div>
-                  </Field>
-                </div>
+                <Field label="Background">
+                  {/* plain plate behind empty slots — black (default) or white, never a gradient */}
+                  <div className="flex gap-2">
+                    {(["black", "white"] as const).map((c) => (
+                      <button
+                        key={c}
+                        type="button"
+                        onClick={() => setDraft((d) => ({ ...d, background: c }))}
+                        className={`flex h-9 flex-1 items-center justify-center gap-2 rounded-md border text-xs font-medium transition-colors ${
+                          draft.background === c
+                            ? "border-primary bg-primary text-primary-foreground"
+                            : "border-border bg-secondary/50 text-muted-foreground"
+                        }`}
+                      >
+                        <span
+                          className="h-3.5 w-3.5 rounded-full border border-border"
+                          style={{ background: c === "black" ? "#000000" : "#FFFFFF" }}
+                        />
+                        {c === "black" ? "Black" : "White"}
+                      </button>
+                    ))}
+                  </div>
+                </Field>
                 <p className="text-[11px] text-muted-foreground">
                   {draft.slots.length} slots ·{" "}
                   {draft.slots.filter((s) => s.effect !== "none").length} with

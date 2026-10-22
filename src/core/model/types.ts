@@ -290,8 +290,8 @@ export interface Template {
   description: string;
   categories: string[];
   palette: TemplatePalette;
-  /** show the palette gradient behind empty slots (default off = flat dark) */
-  showBackground?: boolean;
+  /** plain plate behind empty slots — "black" (default) or "white", never a gradient */
+  background?: "black" | "white";
   canvas: { ratio: "9:16"; fps: number; width: number; height: number };
   /**
    * Music is a SOUNDTRACK, never a clock (the unlocked model): one tone
@@ -376,7 +376,7 @@ export interface Schedule {
   duration: number;
   fps: number;
   canvas: { width: number; height: number };
-  meta: { title: string; palette: TemplatePalette; showBackground: boolean };
+  meta: { title: string; palette: TemplatePalette; background: "black" | "white" };
   /** resolved cut times (seconds) — boundaries between media slots */
   cuts: number[];
   slots: ScheduleSlotInfo[];

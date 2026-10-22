@@ -1468,16 +1468,19 @@ check("wav clamps and scales samples into int16",
     wv.getInt16(48, true) === -32768 && wv.getInt16(50, true) === 32767,
   `${wv.getInt16(44, true)} ${wv.getInt16(46, true)} ${wv.getInt16(48, true)} ${wv.getInt16(50, true)}`);
 
-/* ---------- 22. Background toggle + independent text duration ---------- */
-console.log("\n[22] Background toggle + independent text duration");
+/* ---------- 22. Background plate + independent text duration ---------- */
+console.log("\n[22] Background plate + independent text duration");
 
-/* showBackground threads from the template into the resolved meta */
+/* the plain black/white plate threads from the template into the resolved meta */
 const tBgBase = get("tpl.mini_punch");
-check("meta.showBackground defaults to off",
-  resolve(tBgBase, content, PRESET_MAP).meta.showBackground === false);
-check("meta.showBackground threads through when set",
+check("meta.background defaults to black",
+  resolve(tBgBase, content, PRESET_MAP).meta.background === "black");
+check("meta.background threads through when set to white",
+  resolve({ ...tBgBase, background: "white" } as Template, content, PRESET_MAP)
+    .meta.background === "white");
+check("a legacy gradient flag no longer produces a gradient (falls back to black)",
   resolve({ ...tBgBase, showBackground: true } as Template, content, PRESET_MAP)
-    .meta.showBackground === true);
+    .meta.background === "black");
 
 /* a text's window is its OWN seconds — decoupled from the slot length
    (mini_punch's slots are 1.5/1/1.5; a 2s text must stay 2s) */

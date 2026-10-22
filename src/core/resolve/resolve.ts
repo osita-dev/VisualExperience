@@ -528,7 +528,9 @@ export function resolve(
     meta: {
       title: template.title,
       palette: template.palette,
-      showBackground: template.showBackground ?? false,
+      /* the plate is a plain black/white choice — gradient flags on old
+         saves are ignored and fall back to black */
+      background: template.background === "white" ? "white" : "black",
     },
     cuts,
     slots,

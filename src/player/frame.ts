@@ -796,7 +796,7 @@ export class FrameRenderer {
         /* drawn */
       } else {
         lc.filter = "none";
-        this.drawPlaceholder(lc, s.meta, item, VW, VH);
+        this.drawPlaceholder(lc, s.meta, VW, VH);
       }
     }
     lc.restore();
@@ -1463,49 +1463,13 @@ export class FrameRenderer {
   private drawPlaceholder(
     lc: Ctx2D,
     meta: Schedule["meta"],
-    item: MediaPlanItem,
     VW: number,
     VH: number,
   ): void {
-    const { palette } = meta;
-    if (meta.showBackground) {
-      const g = lc.createLinearGradient(0, 0, VW, VH);
-      g.addColorStop(0, palette.from);
-      g.addColorStop(1, palette.to);
-      lc.fillStyle = g;
-    } else {
-      /* background off (the default) — a flat dark plate, not a gradient */
-      lc.fillStyle = "#0B1120";
-    }
+    /* a plain black or white plate — no gradient, no emoji, no slot labels
+       (they only ever cluttered the frame) */
+    lc.fillStyle = meta.background === "white" ? "#FFFFFF" : "#000000";
     lc.fillRect(0, 0, VW, VH);
-
-    lc.save();
-    lc.globalAlpha = 0.06;
-    lc.strokeStyle = "#FFFFFF";
-    lc.lineWidth = 26;
-    for (let x = -VH; x < VW; x += 130) {
-      lc.beginPath();
-      lc.moveTo(x, 0);
-      lc.lineTo(x + VH, VH);
-      lc.stroke();
-    }
-    lc.restore();
-
-    lc.textAlign = "center";
-    lc.textBaseline = "middle";
-    lc.font = `${VH * 0.16}px "Apple Color Emoji", "Segoe UI Emoji", sans-serif`;
-    lc.fillText(palette.emoji, VW / 2, VH * 0.42);
-
-    const label = `SLOT ${item.index + 1} · ${(item.end - item.start).toFixed(1)}s`;
-    lc.font = `700 ${VH * 0.026}px Inter, sans-serif`;
-    const w = measureW(lc, label) + VW * 0.06;
-    const h = VH * 0.05;
-    lc.fillStyle = "rgba(11, 17, 32, 0.55)";
-    lc.beginPath();
-    lc.roundRect(VW / 2 - w / 2, VH * 0.82 - h / 2, w, h, h / 2);
-    lc.fill();
-    lc.fillStyle = "#FFFFFF";
-    lc.fillText(label, VW / 2, VH * 0.82);
   }
 
   private applySlotEffect(
